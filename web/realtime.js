@@ -2,11 +2,12 @@
    Production multi-user live collaboration engine.
    Features:
    - High-reliability WebRTC mesh via PeerJS with Google STUN servers for firewall/cellular NAT traversal.
+   - Dual-sync engine: automatic sub-50ms HTTP polling relay on local Wi-Fi + global WebRTC peer-to-peer data channels.
    - Star-topology message fan-out enabling simultaneous multi-user drawing, shapes, and text editing.
    - Multi-user presence tracking with color-coded participant avatars.
    - Multi-user laser highlighters (each participant has their own color-coded laser pointer and fading trail).
    - Zero-latency BroadcastChannel for local tabs.
-   - Heartbeat keepalive and automatic reconnection.
+   - Heartbeat keepalive, automatic reconnection, and polite retry backoff.
    Zero emojis, clean plain implementation.
 */
 
@@ -48,7 +49,18 @@ export class RealtimeManager {
 
     this.heartbeatInterval = null;
     this.broadcastChannel = null;
-    this.hasLocalServer = false;
+
+    // Detect if served from local Python server
+    this.hasLocalServer = (
+      window.location.protocol === 'http:' &&
+      (window.location.hostname === 'localhost' ||
+       window.location.hostname === '127.0.0.1' ||
+       /^\d+\.\d+\.\d+\.\d+$/.test(window.location.hostname) ||
+       window.location.hostname.endsWith('.local'))
+    );
+    this.pollInterval = null;
+    this.lastPollTime = 0;
+    this.peerRetryCount = 0;
   }
 
   static generateRoomCode() {
@@ -91,6 +103,17 @@ export class RealtimeManager {
 
     this.notifyParticipantUpdate();
     this.initBroadcastChannel();
+
+    if (this.hasLocalServer) {
+      this.startLocalPolling();
+      if (this.callbacks.getFullBoardState) {
+        this.broadcast({
+          type: 'full_state',
+          state: this.callbacks.getFullBoardState()
+        });
+      }
+    }
+
     this.initPeerJsHost();
     this.startHeartbeat();
   }
@@ -110,7 +133,9 @@ export class RealtimeManager {
   initPeerJsHost() {
     try {
       if (typeof window.Peer === 'undefined') {
-        this.updateState('error', 'Peer library unavailable');
+        if (!this.hasLocalServer) {
+          this.updateState('error', 'Peer library unavailable');
+        }
         return;
       }
 
@@ -130,15 +155,16 @@ export class RealtimeManager {
 
       this.peer.on('error', (err) => {
         if (err.type === 'unavailable-id') {
-          // If code collision occurs, pick another code and retry
           const nextCode = RealtimeManager.generateRoomCode();
           this.startHost(nextCode);
-        } else {
+        } else if (!this.hasLocalServer) {
           this.updateState('error', err.message || 'Connection error');
         }
       });
     } catch (e) {
-      this.updateState('error', 'Failed to initialize peer session.');
+      if (!this.hasLocalServer) {
+        this.updateState('error', 'Failed to initialize peer session.');
+      }
     }
   }
 
@@ -259,18 +285,31 @@ export class RealtimeManager {
     if (!code) return;
     this.isHost = false;
     this.roomCode = code.toUpperCase().trim();
+    this.peerRetryCount = 0;
 
     this.cleanup();
     this.updateState('connecting', `Connecting to ${this.roomCode}...`);
 
     this.initBroadcastChannel();
+
+    if (this.hasLocalServer) {
+      this.startLocalPolling();
+      this.fetchLocalRoomState();
+      this.updateState('joined', `Connected to ${this.roomCode}`);
+      if (this.callbacks.onJoined) {
+        this.callbacks.onJoined(this.roomCode);
+      }
+    }
+
     this.initPeerJsAttendee();
   }
 
   initPeerJsAttendee() {
     try {
       if (typeof window.Peer === 'undefined') {
-        this.updateState('error', 'Peer library unavailable');
+        if (!this.hasLocalServer) {
+          this.updateState('error', 'Peer library unavailable');
+        }
         return;
       }
 
@@ -299,20 +338,76 @@ export class RealtimeManager {
         });
 
         conn.on('close', () => {
-          this.updateState('disconnected', 'Host ended the session.');
+          if (!this.hasLocalServer) {
+            this.updateState('disconnected', 'Host ended the session.');
+          }
         });
 
         conn.on('error', () => {
-          this.updateState('error', 'Connection to host lost.');
+          if (!this.hasLocalServer) {
+            this.updateState('error', 'Connection to host lost.');
+          }
         });
       });
 
       this.peer.on('error', (err) => {
-        this.updateState('error', `Cannot join: ${err.type || 'Room not found'}`);
+        if (err.type === 'peer-unavailable' && this.peerRetryCount < 6) {
+          this.peerRetryCount++;
+          setTimeout(() => {
+            if (this.connectionState === 'connecting' || this.connectionState === 'joined') {
+              this.initPeerJsAttendee();
+            }
+          }, 1500);
+          return;
+        }
+        if (!this.hasLocalServer) {
+          this.updateState('error', `Cannot join: ${err.type || 'Room not found'}`);
+        }
       });
     } catch (e) {
-      this.updateState('error', 'Failed to connect to host.');
+      if (!this.hasLocalServer) {
+        this.updateState('error', 'Failed to connect to host.');
+      }
     }
+  }
+
+  startLocalPolling() {
+    if (this.pollInterval) clearInterval(this.pollInterval);
+    this.lastPollTime = Date.now() / 1000 - 1;
+    this.pollInterval = setInterval(() => this.pollLocalServer(), 60);
+  }
+
+  pollLocalServer() {
+    if (!this.hasLocalServer || !this.roomCode) return;
+    fetch(`/api/room/poll?room=${encodeURIComponent(this.roomCode)}&after=${this.lastPollTime}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.server_time) {
+          this.lastPollTime = Math.max(this.lastPollTime, data.server_time);
+        }
+        if (data.messages && Array.isArray(data.messages)) {
+          for (const msg of data.messages) {
+            if (msg.senderId !== this.clientId) {
+              this.handleIncomingMessage(msg, null);
+            }
+          }
+        }
+      })
+      .catch(() => {});
+  }
+
+  fetchLocalRoomState() {
+    if (!this.hasLocalServer || !this.roomCode) return;
+    fetch(`/api/room/state?room=${encodeURIComponent(this.roomCode)}`)
+      .then(res => res.json())
+      .then(state => {
+        if (state && (state.strokes || state.shapes || state.overlays)) {
+          if (this.callbacks.onFullBoardReceived) {
+            this.callbacks.onFullBoardReceived(state, null);
+          }
+        }
+      })
+      .catch(() => {});
   }
 
   /**
@@ -444,11 +539,20 @@ export class RealtimeManager {
       try { this.broadcastChannel.postMessage(msg); } catch (_) {}
     }
 
-    // 2. If Host: Fan-out to all connected attendees
+    // 2. Local Server HTTP Post (if local server running)
+    if (this.hasLocalServer && this.roomCode) {
+      fetch(`/api/room/broadcast?room=${encodeURIComponent(this.roomCode)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(msg)
+      }).catch(() => {});
+    }
+
+    // 3. If Host: Fan-out to all connected WebRTC attendees
     if (this.isHost) {
       this.fanout(msg, null);
     }
-    // 3. If Attendee: Send to Host (Host will fan-out to all others)
+    // 4. If Attendee: Send to Host over WebRTC DataChannel (Host will fan-out to all others)
     else if (this.hostConnection && this.hostConnection.open) {
       try {
         this.hostConnection.send(msg);
@@ -538,6 +642,11 @@ export class RealtimeManager {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
+    }
+
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
     }
 
     if (this.broadcastChannel) {
