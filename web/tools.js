@@ -100,7 +100,6 @@ export class StrokeRenderer {
       return;
     }
 
-    // Calligraphic nib angle (~35 degrees)
     const nibAngle = (35 * Math.PI) / 180;
     const cosAngle = Math.cos(nibAngle);
     const sinAngle = Math.sin(nibAngle);
@@ -115,18 +114,15 @@ export class StrokeRenderer {
       const dirX = dx / dist;
       const dirY = dy / dist;
 
-      // Angle factor between movement direction and nib angle
       const angleDiff = Math.abs(dirX * cosAngle + dirY * sinAngle);
       const nibMod = 0.4 + 0.8 * (1 - angleDiff);
 
-      // Pressure modulation
       const press1 = typeof p1.pressure === 'number' && p1.pressure > 0 ? p1.pressure : 0.5;
       const press2 = typeof p2.pressure === 'number' && p2.pressure > 0 ? p2.pressure : 0.5;
 
       const w1 = Math.max(1, baseSize * (0.5 + 0.9 * press1) * nibMod);
       const w2 = Math.max(1, baseSize * (0.5 + 0.9 * press2) * nibMod);
 
-      // Draw tapered segment
       const perpX = -dirY;
       const perpY = dirX;
 
@@ -138,7 +134,6 @@ export class StrokeRenderer {
       ctx.closePath();
       ctx.fill();
 
-      // Cap
       ctx.beginPath();
       ctx.arc(p2.x, p2.y, w2 / 2, 0, Math.PI * 2);
       ctx.fill();
@@ -169,7 +164,6 @@ export class StrokeRenderer {
     ctx.lineJoin = 'round';
     this.drawMonoline(ctx, points);
 
-    // Subtle graphite grain overlay
     ctx.globalAlpha = opacity * 0.25;
     for (let i = 0; i < points.length; i += 2) {
       const p = points[i];
@@ -265,7 +259,6 @@ export class StrokeRenderer {
     ctx.lineTo(x2, y2);
     ctx.stroke();
 
-    // Arrow head
     ctx.beginPath();
     ctx.moveTo(x2, y2);
     ctx.lineTo(
@@ -340,9 +333,21 @@ export class OverlayManager {
     this.container = overlayContainer;
     this.callbacks = callbacks || {};
     this.elements = new Map(); // id -> { element, data }
+    this.selectedId = null;
     this.panX = 0;
     this.panY = 0;
     this.scale = 1;
+
+    // Listen for global delete/backspace keys
+    window.addEventListener('keydown', (e) => {
+      if (e.target.isContentEditable || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        return;
+      }
+      if ((e.key === 'Backspace' || e.key === 'Delete') && this.selectedId) {
+        e.preventDefault();
+        this.removeElement(this.selectedId, true);
+      }
+    });
   }
 
   setTransform(panX, panY, scale) {
@@ -364,6 +369,20 @@ export class OverlayManager {
     el.style.transform = `translate3d(${screenX}px, ${screenY}px, 0) scale(${this.scale})`;
   }
 
+  selectElement(id) {
+    this.selectedId = id;
+    for (const [elId, record] of this.elements.entries()) {
+      record.element.classList.toggle('selected', elId === id);
+    }
+  }
+
+  deselectAll() {
+    this.selectedId = null;
+    for (const record of this.elements.values()) {
+      record.element.classList.remove('selected');
+    }
+  }
+
   /**
    * Add a Text Box
    */
@@ -380,14 +399,17 @@ export class OverlayManager {
     };
 
     const wrapper = document.createElement('div');
-    wrapper.className = 'canvas-element drag-handle';
+    wrapper.className = 'canvas-element drag-handle selected';
     wrapper.dataset.id = id;
 
-    // Mini element toolbar
+    // Mini element toolbar with robust delete action
     const toolbar = document.createElement('div');
     toolbar.className = 'element-toolbar';
     toolbar.innerHTML = `
-      <button type="button" class="element-action-btn delete" data-action="delete" title="Delete">Delete</button>
+      <button type="button" class="element-action-btn delete" data-action="delete" title="Delete Text Box">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+        <span>Delete</span>
+      </button>
     `;
 
     const textBox = document.createElement('div');
@@ -403,6 +425,7 @@ export class OverlayManager {
     this.container.appendChild(wrapper);
 
     this.elements.set(id, { element: wrapper, data: textData });
+    this.selectElement(id);
     this.updateElementPosition(wrapper, textData);
 
     this.attachElementHandlers(wrapper, textData, textBox);
@@ -411,7 +434,6 @@ export class OverlayManager {
       this.callbacks.onElementChange('add', textData);
     }
 
-    // Auto-focus if newly created
     if (!data.id) {
       setTimeout(() => {
         textBox.focus();
@@ -442,7 +464,7 @@ export class OverlayManager {
     };
 
     const wrapper = document.createElement('div');
-    wrapper.className = 'canvas-element drag-handle';
+    wrapper.className = 'canvas-element drag-handle selected';
     wrapper.dataset.id = id;
 
     const innerWrapper = document.createElement('div');
@@ -452,10 +474,12 @@ export class OverlayManager {
     const toolbar = document.createElement('div');
     toolbar.className = 'element-toolbar';
     toolbar.innerHTML = `
-      <button type="button" class="element-action-btn delete" data-action="delete" title="Delete Table">Delete</button>
+      <button type="button" class="element-action-btn delete" data-action="delete" title="Delete Table">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+        <span>Delete</span>
+      </button>
     `;
 
-    // Table element
     const table = document.createElement('table');
     table.className = 'canvas-table';
 
@@ -476,6 +500,7 @@ export class OverlayManager {
     this.container.appendChild(wrapper);
 
     this.elements.set(id, { element: wrapper, data: tableData });
+    this.selectElement(id);
     this.updateElementPosition(wrapper, tableData);
 
     this.attachTableHandlers(wrapper, tableData, table);
@@ -522,13 +547,16 @@ export class OverlayManager {
     };
 
     const wrapper = document.createElement('div');
-    wrapper.className = 'canvas-element drag-handle';
+    wrapper.className = 'canvas-element drag-handle selected';
     wrapper.dataset.id = id;
 
     const toolbar = document.createElement('div');
     toolbar.className = 'element-toolbar';
     toolbar.innerHTML = `
-      <button type="button" class="element-action-btn delete" data-action="delete" title="Delete Note">Delete</button>
+      <button type="button" class="element-action-btn delete" data-action="delete" title="Delete Note">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+        <span>Delete</span>
+      </button>
     `;
 
     const note = document.createElement('div');
@@ -546,6 +574,7 @@ export class OverlayManager {
     this.container.appendChild(wrapper);
 
     this.elements.set(id, { element: wrapper, data: noteData });
+    this.selectElement(id);
     this.updateElementPosition(wrapper, noteData);
 
     this.attachNoteHandlers(wrapper, noteData, textarea);
@@ -557,14 +586,25 @@ export class OverlayManager {
     return noteData;
   }
 
-  attachElementHandlers(wrapper, data, textBox) {
-    // Delete action
-    wrapper.querySelector('[data-action="delete"]').addEventListener('click', (e) => {
+  bindDeleteButton(btn, dataId) {
+    const doDelete = (e) => {
+      e.preventDefault();
       e.stopPropagation();
-      this.removeElement(data.id, true);
-    });
+      this.removeElement(dataId, true);
+    };
 
-    // Content input
+    btn.addEventListener('click', doDelete);
+    btn.addEventListener('touchend', doDelete);
+    btn.addEventListener('pointerdown', (e) => e.stopPropagation());
+    btn.addEventListener('mousedown', (e) => e.stopPropagation());
+  }
+
+  attachElementHandlers(wrapper, data, textBox) {
+    const deleteBtn = wrapper.querySelector('[data-action="delete"]');
+    if (deleteBtn) this.bindDeleteButton(deleteBtn, data.id);
+
+    wrapper.addEventListener('pointerdown', () => this.selectElement(data.id));
+
     textBox.addEventListener('input', () => {
       data.text = textBox.innerText;
       if (this.callbacks.onElementChange) {
@@ -572,15 +612,14 @@ export class OverlayManager {
       }
     });
 
-    // Draggable handling in world space
     this.makeDraggable(wrapper, data);
   }
 
   attachTableHandlers(wrapper, data, table) {
-    wrapper.querySelector('[data-action="delete"]').addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.removeElement(data.id, true);
-    });
+    const deleteBtn = wrapper.querySelector('[data-action="delete"]');
+    if (deleteBtn) this.bindDeleteButton(deleteBtn, data.id);
+
+    wrapper.addEventListener('pointerdown', () => this.selectElement(data.id));
 
     wrapper.querySelector('[data-action="add-row"]').addEventListener('click', (e) => {
       e.stopPropagation();
@@ -620,10 +659,10 @@ export class OverlayManager {
   }
 
   attachNoteHandlers(wrapper, data, textarea) {
-    wrapper.querySelector('[data-action="delete"]').addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.removeElement(data.id, true);
-    });
+    const deleteBtn = wrapper.querySelector('[data-action="delete"]');
+    if (deleteBtn) this.bindDeleteButton(deleteBtn, data.id);
+
+    wrapper.addEventListener('pointerdown', () => this.selectElement(data.id));
 
     textarea.addEventListener('input', () => {
       data.text = textarea.value;
@@ -643,8 +682,7 @@ export class OverlayManager {
     let originDataY = 0;
 
     const onPointerDown = (e) => {
-      // Don't drag if interacting with contentEditable or inputs
-      if (e.target.isContentEditable || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON') {
+      if (e.target.isContentEditable || e.target.tagName === 'TEXTAREA' || e.target.closest('button')) {
         return;
       }
       isDragging = true;
@@ -687,6 +725,7 @@ export class OverlayManager {
     if (record) {
       record.element.remove();
       this.elements.delete(id);
+      if (this.selectedId === id) this.selectedId = null;
       if (broadcast && this.callbacks.onElementChange) {
         this.callbacks.onElementChange('delete', { id });
       }
@@ -694,10 +733,11 @@ export class OverlayManager {
   }
 
   clear() {
-    for (const [id, record] of this.elements.entries()) {
+    for (const record of this.elements.values()) {
       record.element.remove();
     }
     this.elements.clear();
+    this.selectedId = null;
   }
 
   getAllData() {
@@ -742,7 +782,6 @@ export class OverlayManager {
           }
         }
       } else {
-        // If not found, add it
         this.syncRemoteUpdate('add', data);
       }
     }

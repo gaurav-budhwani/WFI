@@ -1,6 +1,7 @@
 /* Whiteboard Application Main Controller
    Freeform layout, iPad Apple Pencil gestures (1-finger draw, 1-finger pan in hand mode,
    2-finger pan & pinch zoom in all modes, Apple Pencil double-tap toggle eraser),
+   Laser Pointer highlighter (GoodNotes glowing red dot with vanishing trail),
    Pen styles (Fountain, Normal, Marker, Pencil), Shapes, Text Box, Table,
    Black & White theme, and Real-time room live sharing.
    Zero emojis, clean plain implementation.
@@ -15,8 +16,12 @@ class WhiteboardApp {
     this.viewport = document.getElementById('canvasViewport');
     this.gridCanvas = document.getElementById('gridCanvas');
     this.boardCanvas = document.getElementById('boardCanvas');
+    this.laserCanvas = document.getElementById('laserCanvas');
+    this.laserDotCursor = document.getElementById('laserDotCursor');
+
     this.gridCtx = this.gridCanvas.getContext('2d');
     this.boardCtx = this.boardCanvas.getContext('2d');
+    this.laserCtx = this.laserCanvas.getContext('2d');
     this.overlayContainer = document.getElementById('canvasOverlay');
 
     // Toolbars & Controls
@@ -24,6 +29,9 @@ class WhiteboardApp {
     this.sidebarToggleBtn = document.getElementById('sidebarToggleBtn');
     this.sidebarCollapseBtn = document.getElementById('sidebarCollapseBtn');
     this.boardTitleInput = document.getElementById('boardTitleInput');
+    this.topbarRoomPill = document.getElementById('topbarRoomPill');
+    this.topbarRoomCode = document.getElementById('topbarRoomCode');
+    this.topbarCopyCodeBtn = document.getElementById('topbarCopyCodeBtn');
     this.penSettingsDrawer = document.getElementById('penSettingsDrawer');
     this.themeToggleBtn = document.getElementById('themeToggleBtn');
     this.shareBtn = document.getElementById('shareBtn');
@@ -60,6 +68,8 @@ class WhiteboardApp {
     this.joinView = document.getElementById('joinView');
     this.displayRoomCode = document.getElementById('displayRoomCode');
     this.copyCodeBtn = document.getElementById('copyCodeBtn');
+    this.wifiUrlInput = document.getElementById('wifiUrlInput');
+    this.copyWifiUrlBtn = document.getElementById('copyWifiUrlBtn');
     this.shareLinkInput = document.getElementById('shareLinkInput');
     this.copyLinkBtn = document.getElementById('copyLinkBtn');
     this.broadcastViewportCheckbox = document.getElementById('broadcastViewportCheckbox');
@@ -75,26 +85,26 @@ class WhiteboardApp {
     this.scale = 1.0;
     this.minScale = 0.25;
     this.maxScale = 4.0;
-    this.gridStyle = 'dots'; // 'dots' | 'grid' | 'none'
+    this.gridStyle = 'dots';
     this.dpr = window.devicePixelRatio || 1;
 
     // Tool State
-    this.currentTool = 'pen'; // 'pen' | 'hand' | 'eraser' | 'shape' | 'text' | 'table' | 'note'
+    this.currentTool = 'pen'; // 'pen' | 'hand' | 'laser' | 'eraser' | 'shape' | 'text' | 'table' | 'note'
     this.previousToolBeforeEraser = 'pen';
-    this.penStyle = 'fountain'; // 'fountain' | 'normal' | 'marker' | 'pencil'
+    this.penStyle = 'fountain';
     this.penOpacity = 1.0;
     this.penSize = 4;
     this.penColor = '#ffffff';
     this.selectedShape = 'line';
 
     // Whiteboard Data
-    this.strokes = []; // Completed strokes
-    this.shapes = [];  // Completed shapes
+    this.strokes = [];
+    this.shapes = [];
     this.undoStack = [];
     this.redoStack = [];
 
     // Pointer & Gesture Tracking
-    this.activePointers = new Map(); // pointerId -> { x, y, startX, startY, time }
+    this.activePointers = new Map();
     this.isDrawing = false;
     this.currentStroke = null;
     this.isPanning = false;
@@ -119,22 +129,36 @@ class WhiteboardApp {
     this.isDrawingShape = false;
     this.currentShapePreview = null;
 
+    // GoodNotes Laser Pointer State
+    this.isLaserActive = false;
+    this.laserTrail = []; // { x, y, timestamp }
+    this.remoteLaserTrail = []; // { x, y, timestamp }
+    this.remoteLaserActive = false;
+    this.remoteLaserPos = { x: 0, y: 0 };
+    this.laserAnimFrame = null;
+
     // Subsystems
     this.overlayManager = new OverlayManager(this.overlayContainer, {
       onElementChange: (action, data) => {
         this.saveHistorySnapshot();
         this.realtime.broadcastOverlayChange(action, data);
+        if (this.realtime.isHost) {
+          this.realtime.broadcastFullState(this.serializeBoard());
+        }
       }
     });
 
     this.realtime = new RealtimeManager({
       onHostReady: (code, url) => {
+        this.topbarRoomCode.innerText = code;
         this.displayRoomCode.innerText = code;
         this.shareLinkInput.value = url;
         this.roomStatusLabel.innerText = `Host: ${code}`;
         this.roomStatusBadge.className = 'room-status-badge live';
+        this.fetchWifiInfo(code);
       },
       onJoined: (code) => {
+        this.topbarRoomCode.innerText = code;
         this.roomStatusLabel.innerText = `Joined: ${code}`;
         this.roomStatusBadge.className = 'room-status-badge connected';
         this.showToast(`Connected to room ${code}`);
@@ -184,6 +208,9 @@ class WhiteboardApp {
       onRemoteStrokeEnd: (strokeId) => {
         this.redrawBoard();
       },
+      onRemoteLaser: (data) => {
+        this.handleRemoteLaser(data);
+      },
       onRemoteShapeAdd: (shape) => {
         this.shapes.push(shape);
         this.redrawBoard();
@@ -229,14 +256,26 @@ class WhiteboardApp {
     if (joinCode) {
       this.realtime.joinRoom(joinCode);
     } else {
-      // Auto-start local host session
       this.realtime.startHost();
     }
 
-    // Initial render
     this.resizeCanvases();
     this.redrawGrid();
     this.redrawBoard();
+  }
+
+  fetchWifiInfo(roomCode) {
+    fetch('/api/network-info')
+      .then(res => res.json())
+      .then(info => {
+        if (info && info.ipad_url) {
+          const fullIpadUrl = `${info.ipad_url}?room=${encodeURIComponent(roomCode)}`;
+          if (this.wifiUrlInput) {
+            this.wifiUrlInput.value = fullIpadUrl;
+          }
+        }
+      })
+      .catch(() => {});
   }
 
   /* ---------------- Resize & DPI Setup ---------------- */
@@ -245,6 +284,7 @@ class WhiteboardApp {
       this.resizeCanvases();
       this.redrawGrid();
       this.redrawBoard();
+      this.renderLaserTrail();
     });
   }
 
@@ -263,8 +303,14 @@ class WhiteboardApp {
     this.boardCanvas.style.width = `${width}px`;
     this.boardCanvas.style.height = `${height}px`;
 
+    this.laserCanvas.width = width * this.dpr;
+    this.laserCanvas.height = height * this.dpr;
+    this.laserCanvas.style.width = `${width}px`;
+    this.laserCanvas.style.height = `${height}px`;
+
     this.gridCtx.setTransform(1, 0, 0, 1, 0, 0);
     this.boardCtx.setTransform(1, 0, 0, 1, 0, 0);
+    this.laserCtx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
   /* ---------------- Coordinate Transformation ---------------- */
@@ -287,8 +333,8 @@ class WhiteboardApp {
     this.overlayManager.setTransform(this.panX, this.panY, this.scale);
     this.redrawGrid();
     this.redrawBoard();
+    this.renderLaserTrail();
 
-    // Broadcast viewport change if host
     this.realtime.broadcastViewportTransform(this.panX, this.panY, this.scale);
   }
 
@@ -311,7 +357,6 @@ class WhiteboardApp {
     const dotSpacing = 28 * this.scale;
     const dotRadius = Math.max(1, 1.2 * Math.min(1.5, this.scale));
 
-    // Calculate grid alignment
     const startX = (this.panX % dotSpacing + dotSpacing) % dotSpacing;
     const startY = (this.panY % dotSpacing + dotSpacing) % dotSpacing;
 
@@ -352,30 +397,131 @@ class WhiteboardApp {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
 
-    // Apply canvas camera transform (world to screen)
     ctx.translate(this.panX, this.panY);
     ctx.scale(this.scale, this.scale);
 
-    // 1. Draw completed strokes
     for (const stroke of this.strokes) {
       StrokeRenderer.renderStroke(ctx, stroke);
     }
 
-    // 2. Draw live stroke currently in progress
     if (this.isDrawing && this.currentStroke) {
       StrokeRenderer.renderStroke(ctx, this.currentStroke);
     }
 
-    // 3. Draw completed shapes
     for (const shape of this.shapes) {
       StrokeRenderer.renderShape(ctx, shape);
     }
 
-    // 4. Draw shape preview in progress
     if (this.isDrawingShape && this.currentShapePreview) {
       StrokeRenderer.renderShape(ctx, this.currentShapePreview);
     }
 
+    ctx.restore();
+  }
+
+  /* ---------------- GoodNotes Laser Pointer & Trail ---------------- */
+  handleRemoteLaser(data) {
+    if (!data.active) {
+      this.remoteLaserActive = false;
+      return;
+    }
+
+    this.remoteLaserActive = true;
+    this.remoteLaserPos = { x: data.x, y: data.y };
+    this.remoteLaserTrail.push({
+      x: data.x,
+      y: data.y,
+      timestamp: Date.now()
+    });
+
+    this.triggerLaserLoop();
+  }
+
+  triggerLaserLoop() {
+    if (!this.laserAnimFrame) {
+      this.laserAnimFrame = requestAnimationFrame(() => this.renderLaserTrail());
+    }
+  }
+
+  renderLaserTrail() {
+    this.laserAnimFrame = null;
+    const ctx = this.laserCtx;
+    const width = this.viewport.clientWidth;
+    const height = this.viewport.clientHeight;
+    const now = Date.now();
+    const trailDuration = 1000; // 1 second vanishing trail
+
+    ctx.save();
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+
+    // Apply canvas world transform
+    ctx.translate(this.panX, this.panY);
+    ctx.scale(this.scale, this.scale);
+
+    // Filter points older than trail duration
+    this.laserTrail = this.laserTrail.filter(pt => now - pt.timestamp < trailDuration);
+    this.remoteLaserTrail = this.remoteLaserTrail.filter(pt => now - pt.timestamp < trailDuration);
+
+    // Draw Local Laser Trail
+    this.drawFadingLaserSegments(ctx, this.laserTrail, now, trailDuration);
+
+    // Draw Remote Laser Trail & Dot
+    this.drawFadingLaserSegments(ctx, this.remoteLaserTrail, now, trailDuration);
+
+    if (this.remoteLaserActive && this.remoteLaserPos) {
+      this.drawLaserDot(ctx, this.remoteLaserPos.x, this.remoteLaserPos.y);
+    }
+
+    ctx.restore();
+
+    // Continue animation loop if trails still exist or active
+    if (this.laserTrail.length > 0 || this.remoteLaserTrail.length > 0 || this.isLaserActive || this.remoteLaserActive) {
+      this.laserAnimFrame = requestAnimationFrame(() => this.renderLaserTrail());
+    }
+  }
+
+  drawFadingLaserSegments(ctx, trail, now, duration) {
+    if (trail.length < 2) return;
+
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for (let i = 0; i < trail.length - 1; i++) {
+      const p1 = trail[i];
+      const p2 = trail[i + 1];
+      const age = now - p2.timestamp;
+      const progress = Math.max(0, Math.min(1, 1 - (age / duration)));
+      if (progress <= 0) continue;
+
+      ctx.save();
+      ctx.shadowColor = '#ff3b30';
+      ctx.shadowBlur = 12 * progress;
+      ctx.strokeStyle = `rgba(255, 59, 48, ${progress * 0.95})`;
+      ctx.lineWidth = Math.max(2, 6 * progress);
+
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  drawLaserDot(ctx, worldX, worldY) {
+    ctx.save();
+    ctx.shadowColor = '#ff3b30';
+    ctx.shadowBlur = 16;
+    ctx.fillStyle = '#ff3b30';
+
+    ctx.beginPath();
+    ctx.arc(worldX, worldY, 7 / this.scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(worldX, worldY, 2.5 / this.scale, 0, Math.PI * 2);
+    ctx.fill();
     ctx.restore();
   }
 
@@ -388,18 +534,24 @@ class WhiteboardApp {
     el.addEventListener('pointerup', (e) => this.handlePointerUp(e), { passive: false });
     el.addEventListener('pointercancel', (e) => this.handlePointerUp(e), { passive: false });
 
-    // Wheel event for desktop zoom and trackpad pan
     el.addEventListener('wheel', (e) => this.handleWheel(e), { passive: false });
 
-    // Safari iPad gesture events fallback
     el.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false });
     el.addEventListener('gesturechange', (e) => e.preventDefault(), { passive: false });
     el.addEventListener('gestureend', (e) => e.preventDefault(), { passive: false });
   }
 
   handlePointerDown(e) {
+    // If interacting directly with an overlay element, do not capture or prevent default!
+    if (e.target.closest('#canvasOverlay') || e.target.closest('.canvas-element')) {
+      return;
+    }
+
     e.preventDefault();
     this.viewport.setPointerCapture(e.pointerId);
+
+    // Clicking background deselects overlay elements
+    this.overlayManager.deselectAll();
 
     const rect = this.viewport.getBoundingClientRect();
     const screenX = e.clientX - rect.left;
@@ -417,13 +569,11 @@ class WhiteboardApp {
     });
 
     // Detect Apple Pencil Double-Tap
-    // If pointer is pen, check for consecutive taps without movement within 300ms
     if (e.pointerType === 'pen') {
       const now = Date.now();
       const timeDiff = now - this.lastPencilTapTime;
       const dist = Math.hypot(screenX - this.lastPencilTapX, screenY - this.lastPencilTapY);
-      if (timeDiff < 320 && dist < 12) {
-        // Toggle Eraser
+      if (timeDiff < 320 && dist < 14) {
         this.toggleEraserMode();
         this.lastPencilTapTime = 0;
         return;
@@ -433,18 +583,18 @@ class WhiteboardApp {
       this.lastPencilTapY = screenY;
     }
 
-    // CASE 1: Exactly 2 pointers active -> Cancel any drawing and start 2-finger pan & pinch zoom
+    // 2-Finger Pinch & Pan
     if (this.activePointers.size === 2) {
-      if (this.isDrawing) {
-        this.cancelCurrentStroke();
-      }
+      if (this.isDrawing) this.cancelCurrentStroke();
+      this.isLaserActive = false;
+      this.laserDotCursor.hidden = true;
       this.startPinchZoom();
       return;
     }
 
-    // CASE 2: Single pointer
+    // Single Pointer
     if (this.activePointers.size === 1) {
-      // If tool is Hand -> Move / Pan canvas (1 finger pan)
+      // Hand tool
       if (this.currentTool === 'hand' || e.button === 1 || e.buttons === 4) {
         this.isPanning = true;
         this.panStartScreenX = screenX;
@@ -455,28 +605,58 @@ class WhiteboardApp {
         return;
       }
 
-      // If tool is Pen or Eraser -> Start drawing stroke
-      if (this.currentTool === 'pen' || this.currentTool === 'eraser') {
+      // Laser Pointer tool (GoodNotes style)
+      if (this.currentTool === 'laser') {
+        this.isLaserActive = true;
+        this.laserDotCursor.hidden = false;
+        this.laserDotCursor.style.left = `${screenX}px`;
+        this.laserDotCursor.style.top = `${screenY}px`;
+
+        this.laserTrail.push({ x: world.x, y: world.y, timestamp: Date.now() });
+        this.triggerLaserLoop();
+        this.realtime.broadcastLaser({ x: world.x, y: world.y, active: true });
+        return;
+      }
+
+      // Eraser Tool
+      if (this.currentTool === 'eraser') {
         this.isDrawing = true;
-        const strokeId = `s_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+        this.eraseAtPoint(world.x, world.y, 24 / this.scale);
+
+        const strokeId = `e_${Date.now()}`;
         this.currentStroke = {
           id: strokeId,
-          tool: this.currentTool,
-          style: this.currentTool === 'eraser' ? 'normal' : this.penStyle,
-          color: this.penColor,
-          opacity: this.currentTool === 'eraser' ? 1.0 : this.penOpacity,
-          size: this.currentTool === 'eraser' ? 28 : this.penSize,
-          points: [
-            { x: world.x, y: world.y, pressure, time: Date.now() }
-          ]
+          tool: 'eraser',
+          style: 'normal',
+          color: 'rgba(0,0,0,1)',
+          opacity: 1.0,
+          size: 28,
+          points: [{ x: world.x, y: world.y, pressure: 1.0, time: Date.now() }]
         };
-
         this.redrawBoard();
         this.realtime.broadcastStrokeStart(this.currentStroke);
         return;
       }
 
-      // If tool is Shape -> Start interactive shape drag
+      // Pen Tool
+      if (this.currentTool === 'pen') {
+        this.isDrawing = true;
+        const strokeId = `s_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+        this.currentStroke = {
+          id: strokeId,
+          tool: 'pen',
+          style: this.penStyle,
+          color: this.penColor,
+          opacity: this.penOpacity,
+          size: this.penSize,
+          points: [{ x: world.x, y: world.y, pressure, time: Date.now() }]
+        };
+        this.redrawBoard();
+        this.realtime.broadcastStrokeStart(this.currentStroke);
+        return;
+      }
+
+      // Shape Tool
       if (this.currentTool === 'shape') {
         this.isDrawingShape = true;
         this.currentShapePreview = {
@@ -506,18 +686,15 @@ class WhiteboardApp {
     const world = this.screenToWorld(screenX, screenY);
     const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
 
-    // Update pointer state
     const pRecord = this.activePointers.get(e.pointerId);
     pRecord.screenX = screenX;
     pRecord.screenY = screenY;
 
-    // CASE 1: 2-Finger Pinch-to-zoom and Pan
     if (this.activePointers.size >= 2) {
       this.updatePinchZoom();
       return;
     }
 
-    // CASE 2: Single Finger Hand Tool Pan
     if (this.isPanning) {
       const dx = screenX - this.panStartScreenX;
       const dy = screenY - this.panStartScreenY;
@@ -527,8 +704,19 @@ class WhiteboardApp {
       return;
     }
 
-    // CASE 3: Drawing Pen / Eraser Stroke
+    if (this.currentTool === 'laser' && this.isLaserActive) {
+      this.laserDotCursor.style.left = `${screenX}px`;
+      this.laserDotCursor.style.top = `${screenY}px`;
+      this.laserTrail.push({ x: world.x, y: world.y, timestamp: Date.now() });
+      this.triggerLaserLoop();
+      this.realtime.broadcastLaser({ x: world.x, y: world.y, active: true });
+      return;
+    }
+
     if (this.isDrawing && this.currentStroke) {
+      if (this.currentTool === 'eraser') {
+        this.eraseAtPoint(world.x, world.y, 24 / this.scale);
+      }
       const pt = { x: world.x, y: world.y, pressure, time: Date.now() };
       this.currentStroke.points.push(pt);
       this.redrawBoard();
@@ -536,7 +724,6 @@ class WhiteboardApp {
       return;
     }
 
-    // CASE 4: Shape Preview Drag
     if (this.isDrawingShape && this.currentShapePreview) {
       this.currentShapePreview.endX = world.x;
       this.currentShapePreview.endY = world.y;
@@ -551,30 +738,35 @@ class WhiteboardApp {
       try { this.viewport.releasePointerCapture(e.pointerId); } catch (_) {}
     }
 
-    // End 2-finger pinch
     if (this.isPinching && this.activePointers.size < 2) {
       this.isPinching = false;
     }
 
-    // End Hand tool pan
     if (this.isPanning && this.activePointers.size === 0) {
       this.isPanning = false;
       this.viewport.classList.remove('panning');
     }
 
-    // End Drawing Stroke
+    if (this.currentTool === 'laser') {
+      this.isLaserActive = false;
+      this.laserDotCursor.hidden = true;
+      this.realtime.broadcastLaser({ active: false });
+    }
+
     if (this.isDrawing && this.currentStroke) {
       this.isDrawing = false;
       if (this.currentStroke.points.length > 0) {
         this.saveHistorySnapshot();
         this.strokes.push(this.currentStroke);
         this.realtime.broadcastStrokeEnd(this.currentStroke.id);
+        if (this.realtime.isHost) {
+          this.realtime.broadcastFullState(this.serializeBoard());
+        }
       }
       this.currentStroke = null;
       this.redrawBoard();
     }
 
-    // End Shape Preview & Commit
     if (this.isDrawingShape && this.currentShapePreview) {
       this.isDrawingShape = false;
       const dx = this.currentShapePreview.endX - this.currentShapePreview.startX;
@@ -583,8 +775,29 @@ class WhiteboardApp {
         this.saveHistorySnapshot();
         this.shapes.push(this.currentShapePreview);
         this.realtime.broadcastShape(this.currentShapePreview);
+        if (this.realtime.isHost) {
+          this.realtime.broadcastFullState(this.serializeBoard());
+        }
       }
       this.currentShapePreview = null;
+      this.redrawBoard();
+    }
+  }
+
+  eraseAtPoint(worldX, worldY, radius) {
+    // Erase intersecting shapes
+    const initialShapesCount = this.shapes.length;
+    this.shapes = this.shapes.filter(s => {
+      const minX = Math.min(s.startX, s.endX) - radius;
+      const maxX = Math.max(s.startX, s.endX) + radius;
+      const minY = Math.min(s.startY, s.endY) - radius;
+      const maxY = Math.max(s.startY, s.endY) + radius;
+      const hit = worldX >= minX && worldX <= maxX && worldY >= minY && worldY <= maxY;
+      return !hit;
+    });
+
+    if (this.shapes.length !== initialShapesCount) {
+      this.saveHistorySnapshot();
       this.redrawBoard();
     }
   }
@@ -600,8 +813,6 @@ class WhiteboardApp {
     const worldMid = this.screenToWorld(midScreenX, midScreenY);
     this.pinchCenterWorldX = worldMid.x;
     this.pinchCenterWorldY = worldMid.y;
-    this.pinchMidScreenX = midScreenX;
-    this.pinchMidScreenY = midScreenY;
   }
 
   updatePinchZoom() {
@@ -612,14 +823,11 @@ class WhiteboardApp {
     const currentMidX = (p1.screenX + p2.screenX) / 2;
     const currentMidY = (p1.screenY + p2.screenY) / 2;
 
-    // Zoom scale adjustment
     const ratio = currentDist / this.pinchInitialDistance;
     let newScale = this.pinchInitialScale * ratio;
     newScale = Math.max(this.minScale, Math.min(this.maxScale, newScale));
 
     this.scale = newScale;
-
-    // Center zoom on initial pinch center + pan translation
     this.panX = currentMidX - this.pinchCenterWorldX * this.scale;
     this.panY = currentMidY - this.pinchCenterWorldY * this.scale;
 
@@ -639,11 +847,9 @@ class WhiteboardApp {
     const screenY = e.clientY - rect.top;
 
     if (e.ctrlKey || e.metaKey) {
-      // Pinch-zoom on trackpad
       const zoomFactor = Math.exp(-e.deltaY * 0.01);
       this.zoomAt(screenX, screenY, zoomFactor);
     } else {
-      // 2-finger trackpad or wheel pan
       this.panX -= e.deltaX;
       this.panY -= e.deltaY;
       this.applyTransform();
@@ -676,10 +882,9 @@ class WhiteboardApp {
   setupToolbarEvents() {
     const toolButtons = document.querySelectorAll('.toolbar-pill .tool-btn');
     toolButtons.forEach(btn => {
-      btn.addEventListener('click', (e) => {
+      btn.addEventListener('click', () => {
         const tool = btn.dataset.tool;
         if (tool === 'shape') {
-          // Toggle shape menu popover
           this.shapeMenu.hidden = !this.shapeMenu.hidden;
           return;
         }
@@ -689,7 +894,6 @@ class WhiteboardApp {
       });
     });
 
-    // Shape items in popover
     document.querySelectorAll('.popover-item').forEach(item => {
       item.addEventListener('click', () => {
         this.selectedShape = item.dataset.shape;
@@ -699,23 +903,19 @@ class WhiteboardApp {
       });
     });
 
-    // Close popover if clicked outside
     document.addEventListener('click', (e) => {
       if (!this.toolShapeBtn.contains(e.target) && !this.shapeMenu.contains(e.target)) {
         this.shapeMenu.hidden = true;
       }
     });
 
-    // Text Box tool click
     document.getElementById('toolText').addEventListener('click', () => {
       this.setTool('text');
-      // Create text box at center of screen view
       const center = this.screenToWorld(this.viewport.clientWidth / 2, this.viewport.clientHeight / 2);
       this.overlayManager.addTextBox({ x: center.x - 60, y: center.y - 20 });
       this.setTool('hand');
     });
 
-    // Table tool click
     document.getElementById('toolTable').addEventListener('click', () => {
       this.setTool('table');
       const center = this.screenToWorld(this.viewport.clientWidth / 2, this.viewport.clientHeight / 2);
@@ -723,7 +923,6 @@ class WhiteboardApp {
       this.setTool('hand');
     });
 
-    // Sticky Note click
     document.getElementById('toolNote').addEventListener('click', () => {
       this.setTool('note');
       const center = this.screenToWorld(this.viewport.clientWidth / 2, this.viewport.clientHeight / 2);
@@ -731,11 +930,9 @@ class WhiteboardApp {
       this.setTool('hand');
     });
 
-    // Sidebar Toggles
     this.sidebarToggleBtn.addEventListener('click', () => this.toggleSidebar());
     this.sidebarCollapseBtn.addEventListener('click', () => this.toggleSidebar());
 
-    // New Board button
     this.newBoardBtn.addEventListener('click', () => {
       if (confirm('Create a new blank board? Current board will be cleared.')) {
         this.clearBoard(true);
@@ -743,27 +940,43 @@ class WhiteboardApp {
         this.showToast('New board created');
       }
     });
+
+    // Top bar room pill copy button
+    const copyRoomCode = () => {
+      if (this.realtime.roomCode) {
+        navigator.clipboard.writeText(this.realtime.roomCode).then(() => {
+          this.showToast(`Copied room code: ${this.realtime.roomCode}`);
+        });
+      }
+    };
+    this.topbarRoomPill.addEventListener('click', copyRoomCode);
+    this.topbarCopyCodeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      copyRoomCode();
+    });
   }
 
   setTool(tool) {
     this.currentTool = tool;
 
-    // Update active button state
     document.querySelectorAll('.toolbar-pill .tool-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.tool === tool);
     });
 
-    // Update cursor styling on viewport
-    this.viewport.classList.remove('hand-mode', 'eraser-mode');
+    this.viewport.classList.remove('hand-mode', 'eraser-mode', 'laser-mode');
+    this.laserDotCursor.hidden = true;
+
     if (tool === 'hand') {
       this.viewport.classList.add('hand-mode');
       this.penSettingsDrawer.classList.add('hidden');
     } else if (tool === 'eraser') {
       this.viewport.classList.add('eraser-mode');
       this.penSettingsDrawer.classList.add('hidden');
-    } else if (tool === 'pen') {
-      this.penSettingsDrawer.classList.remove('hidden');
-    } else if (tool === 'shape') {
+    } else if (tool === 'laser') {
+      this.viewport.classList.add('laser-mode');
+      this.penSettingsDrawer.classList.add('hidden');
+      this.showToast('Laser Highlighter: red dot with fading trail');
+    } else if (tool === 'pen' || tool === 'shape') {
       this.penSettingsDrawer.classList.remove('hidden');
     } else {
       this.penSettingsDrawer.classList.add('hidden');
@@ -781,7 +994,6 @@ class WhiteboardApp {
 
   /* ---------------- Pen Settings Drawer Events ---------------- */
   setupPenDrawerEvents() {
-    // Style tabs
     document.querySelectorAll('.style-tab').forEach(tab => {
       tab.addEventListener('click', () => {
         document.querySelectorAll('.style-tab').forEach(t => t.classList.remove('active'));
@@ -790,21 +1002,18 @@ class WhiteboardApp {
       });
     });
 
-    // Opacity slider
     this.penOpacitySlider.addEventListener('input', (e) => {
       const val = parseInt(e.target.value, 10);
       this.penOpacity = val / 100;
       this.penOpacityVal.innerText = `${val}%`;
     });
 
-    // Size slider
     this.penSizeSlider.addEventListener('input', (e) => {
       const val = parseInt(e.target.value, 10);
       this.penSize = val;
       this.penSizeVal.innerText = `${val}px`;
     });
 
-    // Color Swatches
     document.querySelectorAll('.color-swatch').forEach(swatch => {
       swatch.addEventListener('click', () => {
         document.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('active'));
@@ -832,7 +1041,6 @@ class WhiteboardApp {
     });
 
     this.fitViewBtn.addEventListener('click', () => this.fitViewToContent());
-
     this.undoBtn.addEventListener('click', () => this.undo(true));
     this.redoBtn.addEventListener('click', () => this.redo(true));
 
@@ -919,7 +1127,12 @@ class WhiteboardApp {
     }
     this.redrawBoard();
 
-    if (broadcast) this.realtime.broadcastUndo();
+    if (broadcast) {
+      this.realtime.broadcastUndo();
+      if (this.realtime.isHost) {
+        this.realtime.broadcastFullState(this.serializeBoard());
+      }
+    }
   }
 
   redo(broadcast = true) {
@@ -939,7 +1152,12 @@ class WhiteboardApp {
     }
     this.redrawBoard();
 
-    if (broadcast) this.realtime.broadcastRedo();
+    if (broadcast) {
+      this.realtime.broadcastRedo();
+      if (this.realtime.isHost) {
+        this.realtime.broadcastFullState(this.serializeBoard());
+      }
+    }
   }
 
   clearBoard(broadcast = true) {
@@ -948,7 +1166,12 @@ class WhiteboardApp {
     this.shapes = [];
     this.overlayManager.clear();
     this.redrawBoard();
-    if (broadcast) this.realtime.broadcastClear();
+    if (broadcast) {
+      this.realtime.broadcastClear();
+      if (this.realtime.isHost) {
+        this.realtime.broadcastFullState(this.serializeBoard());
+      }
+    }
   }
 
   /* ---------------- Board Serialization ---------------- */
@@ -991,8 +1214,6 @@ class WhiteboardApp {
     document.body.setAttribute('data-theme', theme);
     localStorage.setItem('wfi_theme', theme);
 
-    // Update default pen color: white for dark mode, black for light mode
-    const firstSwatch = document.querySelector('.color-swatch[data-color="#ffffff"], .color-swatch[data-color="#000000"]');
     if (theme === 'light' && this.penColor === '#ffffff') {
       this.penColor = '#000000';
       this.updateColorSwatchActive('#000000');
@@ -1027,7 +1248,6 @@ class WhiteboardApp {
       }
     });
 
-    // Modal tabs
     this.tabHost.addEventListener('click', () => {
       this.tabHost.classList.add('active');
       this.tabJoin.classList.remove('active');
@@ -1042,7 +1262,6 @@ class WhiteboardApp {
       this.joinView.hidden = false;
     });
 
-    // Copy Code
     this.copyCodeBtn.addEventListener('click', () => {
       if (this.realtime.roomCode) {
         navigator.clipboard.writeText(this.realtime.roomCode).then(() => {
@@ -1051,7 +1270,6 @@ class WhiteboardApp {
       }
     });
 
-    // Copy Link
     this.copyLinkBtn.addEventListener('click', () => {
       if (this.shareLinkInput.value) {
         navigator.clipboard.writeText(this.shareLinkInput.value).then(() => {
@@ -1060,12 +1278,20 @@ class WhiteboardApp {
       }
     });
 
-    // Viewport follow checkbox
+    if (this.copyWifiUrlBtn) {
+      this.copyWifiUrlBtn.addEventListener('click', () => {
+        if (this.wifiUrlInput.value) {
+          navigator.clipboard.writeText(this.wifiUrlInput.value).then(() => {
+            this.showToast('Copied iPad Wi-Fi URL');
+          });
+        }
+      });
+    }
+
     this.broadcastViewportCheckbox.addEventListener('change', (e) => {
       this.realtime.broadcastViewport = e.target.checked;
     });
 
-    // Join room button
     this.connectRoomBtn.addEventListener('click', () => {
       const code = this.joinCodeInput.value.trim();
       if (!code) {
@@ -1083,7 +1309,6 @@ class WhiteboardApp {
     });
   }
 
-  /* ---------------- Toast Notification ---------------- */
   showToast(text) {
     if (!this.toastNotification) return;
     this.toastNotification.innerText = text;
@@ -1099,7 +1324,6 @@ class WhiteboardApp {
     }, 2200);
   }
 
-  /* ---------------- Keyboard Shortcuts ---------------- */
   setupKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
@@ -1117,6 +1341,8 @@ class WhiteboardApp {
         this.setTool('pen');
       } else if (e.key === 'h' || e.key === 'H' || e.key === 'v' || e.key === 'V') {
         this.setTool('hand');
+      } else if (e.key === 'l' || e.key === 'L') {
+        this.setTool('laser');
       } else if (e.key === 'e' || e.key === 'E') {
         this.toggleEraserMode();
       } else if (e.key === '+' || e.key === '=') {
@@ -1133,7 +1359,6 @@ class WhiteboardApp {
   }
 }
 
-// Instantiate App once DOM is loaded
 window.addEventListener('DOMContentLoaded', () => {
   window.app = new WhiteboardApp();
 });

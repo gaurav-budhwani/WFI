@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Whiteboard</title>
-  <meta name="description" content="Collaborative whiteboard with Apple Pencil support, pen styles, shapes, text, tables, and real-time live sharing.">
+  <meta name="description" content="Collaborative whiteboard with Apple Pencil support, pen styles, shapes, text, tables, laser pointer, and real-time live sharing.">
   <link rel="icon" type="image/svg+xml" href="./favicon.svg">
   <link rel="stylesheet" href="./style.css">
 
@@ -99,6 +99,13 @@
           <div class="board-title-wrapper">
             <input type="text" id="boardTitleInput" class="board-title-input" value="Untitled Board" spellcheck="false" title="Click to rename board">
           </div>
+
+          <!-- Prominent Notebook Room Code Display with 1-click copy -->
+          <div class="topbar-room-pill" id="topbarRoomPill" title="Room Code for this whiteboard (Click to copy)">
+            <span class="room-pill-label">Room:</span>
+            <strong class="room-pill-code" id="topbarRoomCode">WFI-100</strong>
+            <button type="button" class="room-pill-copy-btn" id="topbarCopyCodeBtn" title="Copy room code">Copy</button>
+          </div>
         </div>
 
         <!-- Center Floating Freeform Toolbar Pill -->
@@ -120,6 +127,16 @@
               <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"></path>
               <path d="M2 2l7.586 7.586"></path>
               <circle cx="11" cy="11" r="2"></circle>
+            </svg>
+          </button>
+
+          <!-- Laser Pointer / Highlighter (Glowing red dot with trail, just like GoodNotes) -->
+          <button type="button" class="tool-btn" id="toolLaser" data-tool="laser" title="Laser Pointer / Highlight (Glowing red dot with trail)" aria-label="Laser Pointer">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="4" y1="20" x2="14" y2="10"></line>
+              <line x1="14" y1="4" x2="20" y2="10"></line>
+              <line x1="12" y1="6" x2="18" y2="12"></line>
+              <circle cx="19" cy="5" r="2.5" fill="#ff3b30" stroke="#ff3b30"></circle>
             </svg>
           </button>
 
@@ -271,8 +288,12 @@
         <canvas id="gridCanvas" class="grid-canvas"></canvas>
         <!-- Drawing Canvas -->
         <canvas id="boardCanvas" class="board-canvas"></canvas>
+        <!-- Laser Trail Canvas (GoodNotes style red dot with fading trail) -->
+        <canvas id="laserCanvas" class="laser-canvas"></canvas>
         <!-- Interactive DOM Overlay (for text boxes, tables, sticky notes) -->
         <div class="canvas-overlay" id="canvasOverlay"></div>
+        <!-- Laser Dot Cursor Element -->
+        <div class="laser-dot-cursor" id="laserDotCursor" hidden></div>
       </div>
 
       <!-- Bottom Left Floating Navigation Controls -->
@@ -368,6 +389,16 @@
           <button type="button" class="btn-copy-code" id="copyCodeBtn" title="Copy code">
             Copy Code
           </button>
+        </div>
+
+        <!-- Wi-Fi URL Card for iPad -->
+        <div class="wifi-info-card" id="wifiInfoCard">
+          <span class="wifi-card-title">iPad on Wi-Fi</span>
+          <p class="wifi-card-desc">Open this URL in Safari on your iPad to illustrate live on the local network:</p>
+          <div class="wifi-url-box">
+            <input type="text" id="wifiUrlInput" class="share-input" readonly placeholder="Detecting Wi-Fi address...">
+            <button type="button" class="btn-copy-code" id="copyWifiUrlBtn">Copy iPad URL</button>
+          </div>
         </div>
 
         <div class="share-url-box">

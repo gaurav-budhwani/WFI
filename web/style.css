@@ -326,7 +326,61 @@ html, body {
 }
 
 .board-title-input:focus {
-  width: 200px;
+  width: 180px;
+}
+
+/* Notebook Room Code Pill (Always visible in Top Bar) */
+.topbar-room-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface-pill);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--surface-pill-border);
+  border-radius: 10px;
+  padding: 0 10px;
+  height: 36px;
+  box-shadow: var(--surface-pill-shadow);
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.topbar-room-pill:hover {
+  background-color: var(--btn-hover-bg);
+}
+
+.room-pill-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.room-pill-code {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--accent-color);
+  letter-spacing: 0.05em;
+}
+
+.room-pill-copy-btn {
+  background: var(--btn-hover-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 7px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.room-pill-copy-btn:hover {
+  background: var(--accent-color);
+  color: #ffffff;
+  border-color: var(--accent-color);
 }
 
 /* Floating Toolbar Pill (Center) */
@@ -369,6 +423,13 @@ html, body {
   background: var(--accent-active-bg);
   color: var(--accent-color);
   border-color: rgba(0, 113, 227, 0.28);
+}
+
+/* Tool button active for Laser Pointer */
+.tool-btn[data-tool="laser"].active {
+  background: rgba(255, 59, 48, 0.18);
+  color: #ff3b30;
+  border-color: rgba(255, 59, 48, 0.35);
 }
 
 .tool-separator {
@@ -659,8 +720,13 @@ body[data-theme="light"] .icon-moon {
   cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" fill="none" stroke="red" stroke-width="2"/></svg>') 10 10, crosshair;
 }
 
+.canvas-viewport.laser-mode {
+  cursor: none;
+}
+
 .grid-canvas,
-.board-canvas {
+.board-canvas,
+.laser-canvas {
   position: absolute;
   top: 0;
   left: 0;
@@ -677,6 +743,20 @@ body[data-theme="light"] .icon-moon {
   height: 100%;
   pointer-events: none;
   overflow: visible;
+}
+
+/* GoodNotes Glowing Red Laser Dot Cursor */
+.laser-dot-cursor {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ff3b30;
+  box-shadow: 0 0 10px #ff3b30, 0 0 22px #ff3b30, 0 0 35px rgba(255, 59, 48, 0.85);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  z-index: 45;
+  transition: transform 0.04s ease-out;
 }
 
 /* Bottom Floating Navigation Pill (Bottom Left) */
@@ -777,7 +857,7 @@ body[data-theme="light"] .icon-moon {
 }
 
 .modal-card {
-  width: 440px;
+  width: 460px;
   max-width: 90vw;
   background: var(--surface-modal);
   border: 1px solid var(--surface-modal-border);
@@ -872,6 +952,36 @@ body[data-theme="light"] .icon-moon {
 .btn-copy-code:hover,
 .btn-copy-link:hover {
   background: var(--btn-active-bg);
+}
+
+/* Wi-Fi URL Card for iPad */
+.wifi-info-card {
+  background: var(--btn-hover-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wifi-card-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--status-green);
+}
+
+.wifi-card-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.wifi-url-box {
+  display: flex;
+  gap: 8px;
 }
 
 .share-url-box {
@@ -1013,10 +1123,12 @@ body[data-theme="light"] .icon-moon {
   -webkit-user-select: text;
   box-sizing: border-box;
   transform-origin: 0 0;
+  transition: outline 0.1s ease;
 }
 
 .canvas-element.selected {
   outline: 2px solid var(--accent-color);
+  border-radius: 6px;
 }
 
 /* Text Box Object */
@@ -1041,40 +1153,44 @@ body[data-theme="light"] .icon-moon {
   background: rgba(125, 125, 125, 0.08);
 }
 
+/* Prominent Floating Action Toolbar for Elements */
 .element-toolbar {
   position: absolute;
-  top: -34px;
+  top: -38px;
   left: 0;
   display: flex;
   align-items: center;
   gap: 4px;
-  background: var(--surface-pill);
-  backdrop-filter: blur(16px);
-  border: 1px solid var(--surface-pill-border);
+  background: var(--surface-modal);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--surface-modal-border);
   border-radius: 8px;
-  padding: 2px 6px;
-  box-shadow: var(--surface-pill-shadow);
-  z-index: 10;
+  padding: 3px 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  z-index: 60;
 }
 
-.element-action-btn {
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  color: var(--text-secondary);
+.element-action-btn.delete {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255, 69, 58, 0.12);
+  color: var(--status-red);
+  border: 1px solid rgba(255, 69, 58, 0.25);
+  border-radius: 6px;
+  padding: 4px 8px;
   font-size: 11px;
   font-family: var(--font-sans);
-  padding: 4px 6px;
+  font-weight: 600;
   cursor: pointer;
+  transition: all 0.12s ease;
 }
 
-.element-action-btn:hover {
-  background: var(--btn-hover-bg);
-  color: var(--text-primary);
-}
-
-.element-action-btn.delete:hover {
-  color: var(--status-red);
+.element-action-btn.delete:hover,
+.element-action-btn.delete:active {
+  background: var(--status-red);
+  color: #ffffff;
 }
 
 /* Table Object */
@@ -1183,9 +1299,9 @@ body[data-theme="light"] .icon-moon {
     max-width: 90vw;
   }
   .board-title-input {
-    width: 90px;
+    width: 80px;
   }
   .board-title-input:focus {
-    width: 130px;
+    width: 120px;
   }
 }
