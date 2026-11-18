@@ -56,16 +56,33 @@ export class StrokeRenderer {
    */
   static drawNormalPen(ctx, stroke, opacity) {
     ctx.globalAlpha = opacity;
-    ctx.lineWidth = stroke.size || 4;
-    this.drawMonoline(ctx, stroke.points);
+    const baseSize = stroke.size || 4;
+    const points = stroke.points;
+    if (!points || points.length === 0) return;
+
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = baseSize;
+    this.drawMonoline(ctx, points);
   }
 
   static drawMonoline(ctx, points) {
+    if (!points || points.length === 0) return;
+
     if (points.length === 1) {
       const p = points[0];
+      const r = Math.max(1, (ctx.lineWidth || 4) / 2);
       ctx.beginPath();
-      ctx.arc(p.x, p.y, (ctx.lineWidth || 4) / 2, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
       ctx.fill();
+      return;
+    }
+
+    if (points.length === 2) {
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      ctx.lineTo(points[1].x, points[1].y);
+      ctx.stroke();
       return;
     }
 
@@ -84,16 +101,17 @@ export class StrokeRenderer {
   }
 
   /**
-   * Fountain Pen: calligraphic stroke responsive to pressure, velocity, and nib angle.
+   * Fountain Pen: smooth calligraphic bezier stroke responsive to pressure, velocity, and nib angle.
    */
   static drawFountainPen(ctx, stroke, opacity) {
     ctx.globalAlpha = opacity;
     const baseSize = stroke.size || 4;
     const points = stroke.points;
+    if (!points || points.length === 0) return;
 
     if (points.length === 1) {
       const p = points[0];
-      const radius = Math.max(1, baseSize * (p.pressure || 0.5));
+      const radius = Math.max(1, (baseSize * (p.pressure || 0.5)) / 2);
       ctx.beginPath();
       ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
       ctx.fill();
@@ -104,40 +122,79 @@ export class StrokeRenderer {
     const cosAngle = Math.cos(nibAngle);
     const sinAngle = Math.sin(nibAngle);
 
-    for (let i = 0; i < points.length - 1; i++) {
-      const p1 = points[i];
-      const p2 = points[i + 1];
+    // Precalculate smoothed widths along the stroke
+    const widths = new Float32Array(points.length);
+    let prevW = baseSize * (points[0].pressure || 0.5);
 
-      const dx = p2.x - p1.x;
-      const dy = p2.y - p1.y;
-      const dist = Math.hypot(dx, dy) || 1;
-      const dirX = dx / dist;
-      const dirY = dy / dist;
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
+      let dirX = 1;
+      let dirY = 0;
+      if (i < points.length - 1) {
+        const dx = points[i + 1].x - p.x;
+        const dy = points[i + 1].y - p.y;
+        const len = Math.hypot(dx, dy) || 1;
+        dirX = dx / len;
+        dirY = dy / len;
+      } else if (i > 0) {
+        const dx = p.x - points[i - 1].x;
+        const dy = p.y - points[i - 1].y;
+        const len = Math.hypot(dx, dy) || 1;
+        dirX = dx / len;
+        dirY = dy / len;
+      }
 
       const angleDiff = Math.abs(dirX * cosAngle + dirY * sinAngle);
-      const nibMod = 0.4 + 0.8 * (1 - angleDiff);
-
-      const press1 = typeof p1.pressure === 'number' && p1.pressure > 0 ? p1.pressure : 0.5;
-      const press2 = typeof p2.pressure === 'number' && p2.pressure > 0 ? p2.pressure : 0.5;
-
-      const w1 = Math.max(1, baseSize * (0.5 + 0.9 * press1) * nibMod);
-      const w2 = Math.max(1, baseSize * (0.5 + 0.9 * press2) * nibMod);
-
-      const perpX = -dirY;
-      const perpY = dirX;
-
-      ctx.beginPath();
-      ctx.moveTo(p1.x - perpX * (w1 / 2), p1.y - perpY * (w1 / 2));
-      ctx.lineTo(p1.x + perpX * (w1 / 2), p1.y + perpY * (w1 / 2));
-      ctx.lineTo(p2.x + perpX * (w2 / 2), p2.y + perpY * (w2 / 2));
-      ctx.lineTo(p2.x - perpX * (w2 / 2), p2.y - perpY * (w2 / 2));
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.beginPath();
-      ctx.arc(p2.x, p2.y, w2 / 2, 0, Math.PI * 2);
-      ctx.fill();
+      const nibMod = 0.45 + 0.75 * (1 - angleDiff);
+      const press = typeof p.pressure === 'number' && p.pressure > 0 ? p.pressure : 0.5;
+      const rawW = baseSize * (0.4 + 0.9 * press) * nibMod;
+      const smoothW = prevW * 0.4 + rawW * 0.6;
+      widths[i] = Math.max(1, smoothW);
+      prevW = smoothW;
     }
+
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    if (points.length === 2) {
+      ctx.lineWidth = widths[0];
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      ctx.lineTo(points[1].x, points[1].y);
+      ctx.stroke();
+      return;
+    }
+
+    // Draw quadratic curve segments between midpoints with continuously smoothed width
+    let prevMidX = (points[0].x + points[1].x) / 2;
+    let prevMidY = (points[0].y + points[1].y) / 2;
+
+    ctx.lineWidth = widths[0];
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    ctx.lineTo(prevMidX, prevMidY);
+    ctx.stroke();
+
+    for (let i = 1; i < points.length - 1; i++) {
+      const nextMidX = (points[i].x + points[i + 1].x) / 2;
+      const nextMidY = (points[i].y + points[i + 1].y) / 2;
+
+      ctx.lineWidth = widths[i];
+      ctx.beginPath();
+      ctx.moveTo(prevMidX, prevMidY);
+      ctx.quadraticCurveTo(points[i].x, points[i].y, nextMidX, nextMidY);
+      ctx.stroke();
+
+      prevMidX = nextMidX;
+      prevMidY = nextMidY;
+    }
+
+    const last = points[points.length - 1];
+    ctx.lineWidth = widths[widths.length - 1];
+    ctx.beginPath();
+    ctx.moveTo(prevMidX, prevMidY);
+    ctx.lineTo(last.x, last.y);
+    ctx.stroke();
   }
 
   /**
