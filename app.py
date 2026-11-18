@@ -2,10 +2,7 @@
 import http.server
 import json
 import os
-import queue
-import re
 import socket
-import socketserver
 import subprocess
 import sys
 import threading
@@ -14,9 +11,9 @@ import urllib.parse
 import webbrowser
 from pathlib import Path
 
-# In-memory room message hubs for local Wi-Fi real-time live sync
-ROOM_SUBSCRIBERS = {}
-ROOM_STATES = {}
+# In-memory room message storage for reliable local Wi-Fi sync
+ROOM_MESSAGES = {} # room_id -> list of { id, time, ... }
+ROOM_STATES = {}   # room_id -> latest board state snapshot
 ROOM_LOCK = threading.Lock()
 
 def get_bonjour_hostname():
@@ -35,7 +32,7 @@ def get_bonjour_hostname():
         return ""
 
 def get_physical_wifi_ip():
-    """Detect the real physical Wi-Fi or Ethernet IPv4 address, strictly ignoring virtual bridges and tunnels."""
+    """Detect the real physical Wi-Fi or Ethernet IPv4 address, strictly ignoring virtual bridges and VM networks."""
     ignored_prefixes = ("bridge", "vmnet", "vmenet", "vbox", "utun", "docker", "p2p", "awdl", "llw", "lo")
     iface_ips = {}
 
@@ -53,7 +50,7 @@ def get_physical_wifi_ip():
                     if not ip.startswith("127.") and not ip.startswith("169.254."):
                         iface_ips[current_iface].append(ip)
 
-        # 1. Prioritize en0 (standard primary Wi-Fi interface on macOS)
+        # 1. Prioritize en0 (primary physical Wi-Fi interface on macOS)
         if "en0" in iface_ips and iface_ips["en0"]:
             return iface_ips["en0"][0]
 
@@ -96,9 +93,6 @@ def find_available_port(start_port=8000, max_tries=50):
     return start_port
 
 class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
-    # Use HTTP/1.1 so EventSource (SSE) connections remain persistently open
-    protocol_version = "HTTP/1.1"
-
     def __init__(self, *args, **kwargs):
         base_dir = Path(__file__).resolve().parent / "web"
         if not base_dir.exists():
@@ -106,19 +100,8 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(base_dir), **kwargs)
 
     def log_message(self, format, *args):
+        # Keep console output clean
         pass
-
-    def handle(self):
-        try:
-            super().handle()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        except OSError as e:
-            # 57: Socket not connected, 54: Connection reset by peer, 32: Broken pipe
-            if e.errno in (57, 54, 32):
-                pass
-            else:
-                raise
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -141,10 +124,8 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
-            self.close_connection = True
             return
 
         # API: Retrieve current room state snapshot
@@ -157,55 +138,30 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
-            self.close_connection = True
             return
 
-        # API: Server-Sent Events (SSE) live streaming for local Wi-Fi sync
-        if path == "/api/room/stream":
+        # API: High-speed polling for live room updates
+        if path == "/api/room/poll":
             room_id = (query.get("room", ["DEFAULT"])[0]).upper()
-            client_queue = queue.Queue()
+            after_time = float(query.get("after", [0])[0])
 
             with ROOM_LOCK:
-                if room_id not in ROOM_SUBSCRIBERS:
-                    ROOM_SUBSCRIBERS[room_id] = []
-                ROOM_SUBSCRIBERS[room_id].append(client_queue)
+                messages = ROOM_MESSAGES.get(room_id, [])
+                new_msgs = [m for m in messages if m.get("_ts", 0) > after_time]
 
-            self.close_connection = True
+            data = {
+                "messages": new_msgs,
+                "server_time": time.time()
+            }
+            body = json.dumps(data).encode("utf-8")
             self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
+            self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-
-            try:
-                self.wfile.write(b": connected\n\n")
-                self.wfile.flush()
-            except Exception:
-                with ROOM_LOCK:
-                    if room_id in ROOM_SUBSCRIBERS and client_queue in ROOM_SUBSCRIBERS[room_id]:
-                        ROOM_SUBSCRIBERS[room_id].remove(client_queue)
-                return
-
-            try:
-                while True:
-                    try:
-                        msg = client_queue.get(timeout=15.0)
-                        payload = f"data: {json.dumps(msg)}\n\n".encode("utf-8")
-                        self.wfile.write(payload)
-                        self.wfile.flush()
-                    except queue.Empty:
-                        self.wfile.write(b": ping\n\n")
-                        self.wfile.flush()
-            except Exception:
-                pass
-            finally:
-                with ROOM_LOCK:
-                    if room_id in ROOM_SUBSCRIBERS and client_queue in ROOM_SUBSCRIBERS[room_id]:
-                        ROOM_SUBSCRIBERS[room_id].remove(client_queue)
+            self.wfile.write(body)
             return
 
         # Static file delivery
@@ -216,7 +172,7 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
 
-        # API: Broadcast real-time event to all subscribers in room
+        # API: Broadcast real-time event to room
         if path == "/api/room/broadcast":
             room_id = (query.get("room", ["DEFAULT"])[0]).upper()
             content_length = int(self.headers.get("Content-Length", 0))
@@ -229,26 +185,25 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            if data.get("type") == "full_state":
-                with ROOM_LOCK:
-                    ROOM_STATES[room_id] = data.get("state", {})
+            now = time.time()
+            data["_ts"] = now
 
             with ROOM_LOCK:
-                subscribers = list(ROOM_SUBSCRIBERS.get(room_id, []))
+                if room_id not in ROOM_MESSAGES:
+                    ROOM_MESSAGES[room_id] = []
+                ROOM_MESSAGES[room_id].append(data)
+                # Keep last 500 messages
+                if len(ROOM_MESSAGES[room_id]) > 500:
+                    ROOM_MESSAGES[room_id] = ROOM_MESSAGES[room_id][-300:]
 
-            for q in subscribers:
-                try:
-                    q.put_nowait(data)
-                except Exception:
-                    pass
+                if data.get("type") == "full_state":
+                    ROOM_STATES[room_id] = data.get("state", {})
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
-            self.close_connection = True
             return
 
         self.send_response(404)
@@ -261,18 +216,19 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
-class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+class SafeThreadingServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
     def handle_error(self, request, client_address):
-        # Gracefully silence normal browser disconnects and socket resets
+        # Silently ignore normal browser socket disconnects and resets
         exc_type, exc_val, exc_tb = sys.exc_info()
         if isinstance(exc_val, (BrokenPipeError, ConnectionResetError)):
             return
-        if isinstance(exc_val, OSError) and exc_val.errno in (57, 54, 32):
+        if isinstance(exc_val, OSError) and getattr(exc_val, "errno", None) in (57, 54, 32):
             return
-        super().handle_error(request, client_address)
+        # Avoid printing noisy tracebacks for normal browser disconnects
+        pass
 
 def run_server():
     port = find_available_port(8000)
@@ -283,7 +239,7 @@ def run_server():
     wifi_url = f"http://{wifi_ip}:{port}"
     bonjour_url = f"http://{bonjour}:{port}" if bonjour else ""
 
-    server = ThreadingTCPServer(("0.0.0.0", port), WhiteboardHandler)
+    server = SafeThreadingServer(("0.0.0.0", port), WhiteboardHandler)
 
     print("==================================================")
     print("Whiteboard Web Server Running")
@@ -293,10 +249,11 @@ def run_server():
     if bonjour_url:
         print(f"Apple Bonjour: {bonjour_url}")
     print("--------------------------------------------------")
-    print("Important instructions for iPad:")
-    print(f"1. Open Safari on your iPad and go to: {wifi_url}")
-    print(f"   (Always remember to include :{port} at the end)")
-    print("2. Or scan the QR code in the Share dialog on your Mac screen.")
+    print("IMPORTANT INSTRUCTIONS FOR IPAD:")
+    print(f"1. In Safari on your iPad, enter the FULL URL:")
+    print(f"   {wifi_url}")
+    print(f"   (You must include the :{port} port at the end)")
+    print("2. Or click Share on your Mac screen and scan the QR code.")
     print("==================================================")
     print("Opening browser on Mac...")
     print("Press Ctrl+C to stop the server.")

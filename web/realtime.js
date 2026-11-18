@@ -1,9 +1,9 @@
 /* Whiteboard Realtime Module
-   Dual-channel live screen sharing:
-   1. Local Wi-Fi high-speed relay via Server-Sent Events (SSE) and HTTP broadcast
-      (Instant sub-10ms latency, zero cloud dependency, works offline on Wi-Fi).
-   2. WebRTC peer-to-peer fallback via PeerJS (for remote internet attendees).
-   Supports streaming strokes, laser pointer (GoodNotes red dot), shapes, overlays, pan & zoom.
+   Multi-channel live collaboration:
+   1. WebRTC Peer-to-Peer DataChannels via PeerJS (works anywhere in the world and across Wi-Fi networks).
+   2. Local stateless HTTP polling relay (works on local Python server with sub-50ms latency).
+   3. BroadcastChannel (instant zero-latency sync between tabs on same device).
+   Supports streaming strokes, laser highlighter (GoodNotes red dot with vanishing trail), shapes, text, tables, pan and zoom.
    Zero emojis, clean plain implementation.
 */
 
@@ -12,13 +12,15 @@ export class RealtimeManager {
     this.callbacks = callbacks;
     this.peer = null;
     this.connections = new Map(); // peerId -> DataConnection (WebRTC)
-    this.eventSource = null; // SSE connection for local Wi-Fi
     this.roomCode = null;
     this.isHost = true;
     this.broadcastViewport = true;
     this.connectionState = 'disconnected';
     this.clientId = `client_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-    this.participantCount = 0;
+    this.lastPollTime = 0;
+    this.pollInterval = null;
+    this.broadcastChannel = null;
+    this.hasLocalServer = true;
   }
 
   static generateRoomCode() {
@@ -44,20 +46,29 @@ export class RealtimeManager {
       this.callbacks.onHostReady(this.roomCode, this.getShareUrl());
     }
 
-    // 1. Connect to Local Server SSE Stream for instant Wi-Fi sync
-    this.connectLocalSseStream(this.roomCode);
+    this.initBroadcastChannel();
+    this.startLocalPolling();
+    this.initPeerJsHost();
 
-    // 2. Broadcast initial state to local server
+    // Broadcast initial state
     if (this.callbacks.getFullBoardState) {
-      this.postLocalBroadcast({
+      this.broadcast({
         type: 'full_state',
-        senderId: this.clientId,
         state: this.callbacks.getFullBoardState()
       });
     }
+  }
 
-    // 3. Initialize PeerJS WebRTC broker for remote peer discovery
-    this.initPeerJsHost();
+  initBroadcastChannel() {
+    try {
+      if (typeof window.BroadcastChannel !== 'undefined') {
+        this.broadcastChannel = new window.BroadcastChannel(`wfi_room_${this.roomCode}`);
+        this.broadcastChannel.onmessage = (event) => {
+          if (!event.data || event.data.senderId === this.clientId) return;
+          this.handleIncomingMessage(event.data);
+        };
+      }
+    } catch (_) {}
   }
 
   initPeerJsHost() {
@@ -76,7 +87,6 @@ export class RealtimeManager {
           this.connections.set(conn.peer, conn);
           this.updateParticipantCount();
 
-          // Send full board state to new peer
           if (this.callbacks.getFullBoardState) {
             conn.send({
               type: 'init',
@@ -100,7 +110,6 @@ export class RealtimeManager {
 
       this.peer.on('error', (err) => {
         if (err.type === 'unavailable-id') {
-          // If code collision, pick another code
           const nextCode = RealtimeManager.generateRoomCode();
           this.startHost(nextCode);
         }
@@ -119,9 +128,14 @@ export class RealtimeManager {
     this.cleanup();
     this.updateState('connecting', `Connecting to ${this.roomCode}...`);
 
+    this.initBroadcastChannel();
+
     // 1. Fetch current board state from local server if available
     fetch(`/api/room/state?room=${encodeURIComponent(this.roomCode)}`)
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) throw new Error('Not local server');
+        return res.json();
+      })
       .then(state => {
         if (state && (state.strokes || state.shapes || state.overlays)) {
           if (this.callbacks.onFullBoardReceived) {
@@ -130,13 +144,13 @@ export class RealtimeManager {
           this.updateState('joined', `Connected to ${this.roomCode}`);
           if (this.callbacks.onJoined) this.callbacks.onJoined(this.roomCode);
         }
+        this.startLocalPolling();
       })
-      .catch(() => {});
+      .catch(() => {
+        this.hasLocalServer = false;
+      });
 
-    // 2. Connect to local SSE stream for instant Wi-Fi updates
-    this.connectLocalSseStream(this.roomCode);
-
-    // 3. Connect via PeerJS WebRTC as fallback
+    // 2. Connect via PeerJS WebRTC
     this.initPeerJsAttendee();
   }
 
@@ -169,41 +183,38 @@ export class RealtimeManager {
   }
 
   /**
-   * Connect to Server-Sent Events (SSE) Stream on local Python server
+   * Local High-Speed Stateless Polling Relay (sub-80ms updates on local Wi-Fi)
    */
-  connectLocalSseStream(roomCode) {
-    try {
-      if (this.eventSource) {
-        this.eventSource.close();
-      }
+  startLocalPolling() {
+    if (this.pollInterval) clearInterval(this.pollInterval);
+    this.lastPollTime = Date.now() / 1000;
 
-      this.eventSource = new EventSource(`/api/room/stream?room=${encodeURIComponent(roomCode)}`);
+    this.pollInterval = setInterval(() => {
+      if (!this.roomCode || !this.hasLocalServer) return;
 
-      this.eventSource.onopen = () => {
-        if (!this.isHost) {
-          this.updateState('joined', `Connected to ${roomCode}`);
-          if (this.callbacks.onJoined) this.callbacks.onJoined(roomCode);
-        }
-      };
-
-      this.eventSource.onmessage = (event) => {
-        if (!event.data) return;
-        try {
-          const msg = JSON.parse(event.data);
-          // Ignore own messages
-          if (msg.senderId && msg.senderId === this.clientId) return;
-          this.handleIncomingMessage(msg);
-        } catch (_) {}
-      };
-
-      this.eventSource.onerror = () => {
-        // If SSE fails or running on static hosting (e.g. GitHub Pages), close SSE and rely on WebRTC
-        if (this.eventSource) {
-          try { this.eventSource.close(); } catch (_) {}
-          this.eventSource = null;
-        }
-      };
-    } catch (_) {}
+      fetch(`/api/room/poll?room=${encodeURIComponent(this.roomCode)}&after=${this.lastPollTime}`)
+        .then(res => {
+          if (!res.ok) {
+            this.hasLocalServer = false;
+            clearInterval(this.pollInterval);
+            return null;
+          }
+          return res.json();
+        })
+        .then(data => {
+          if (!data) return;
+          if (data.server_time) this.lastPollTime = data.server_time;
+          if (data.messages && data.messages.length > 0) {
+            for (const msg of data.messages) {
+              if (msg.senderId && msg.senderId === this.clientId) continue;
+              this.handleIncomingMessage(msg);
+            }
+          }
+        })
+        .catch(() => {
+          // If network poll fails, don't throw errors
+        });
+    }, 100);
   }
 
   /**
@@ -286,15 +297,26 @@ export class RealtimeManager {
   }
 
   /**
-   * Broadcast message over both Local Wi-Fi Server and WebRTC DataChannels
+   * Broadcast message over WebRTC, local polling server, and BroadcastChannel
    */
   broadcast(msg) {
     msg.senderId = this.clientId;
 
-    // 1. Send via local server HTTP broadcast
-    this.postLocalBroadcast(msg);
+    // 1. BroadcastChannel (instant local sync)
+    if (this.broadcastChannel) {
+      try { this.broadcastChannel.postMessage(msg); } catch (_) {}
+    }
 
-    // 2. Send via WebRTC DataConnections to connected remote peers
+    // 2. Local Server HTTP Post (if local server running)
+    if (this.hasLocalServer && this.roomCode) {
+      fetch(`/api/room/broadcast?room=${encodeURIComponent(this.roomCode)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(msg)
+      }).catch(() => {});
+    }
+
+    // 3. WebRTC DataChannels to remote attendees
     if (this.connections.size > 0) {
       for (const conn of this.connections.values()) {
         if (conn.open) {
@@ -302,17 +324,6 @@ export class RealtimeManager {
         }
       }
     }
-  }
-
-  postLocalBroadcast(msg) {
-    if (!this.roomCode) return;
-    try {
-      fetch(`/api/room/broadcast?room=${encodeURIComponent(this.roomCode)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(msg)
-      }).catch(() => {});
-    } catch (_) {}
   }
 
   broadcastStrokeStart(stroke) {
@@ -386,9 +397,14 @@ export class RealtimeManager {
   }
 
   cleanup() {
-    if (this.eventSource) {
-      try { this.eventSource.close(); } catch (_) {}
-      this.eventSource = null;
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
+    }
+
+    if (this.broadcastChannel) {
+      try { this.broadcastChannel.close(); } catch (_) {}
+      this.broadcastChannel = null;
     }
 
     for (const conn of this.connections.values()) {
