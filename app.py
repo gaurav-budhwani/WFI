@@ -15,20 +15,33 @@ import webbrowser
 from pathlib import Path
 
 # In-memory room message hubs for local Wi-Fi real-time live sync
-# room_id -> list of Queue objects (one for each connected SSE client)
 ROOM_SUBSCRIBERS = {}
 ROOM_STATES = {}
 ROOM_LOCK = threading.Lock()
 
-def get_all_lan_ips():
-    """Detect all active local network IPv4 addresses (Wi-Fi, Ethernet) on macOS/Linux/Windows."""
-    candidates = []
+def get_bonjour_hostname():
+    try:
+        out = subprocess.check_output(["scutil", "--get", "LocalHostName"], text=True).strip()
+        if out:
+            return f"{out}.local"
+    except Exception:
+        pass
+    try:
+        host = socket.gethostname()
+        if not host.endswith(".local"):
+            return f"{host}.local"
+        return host
+    except Exception:
+        return ""
 
-    # 1. On macOS / Unix, inspect ifconfig output for active interfaces
+def get_physical_wifi_ip():
+    """Detect the real physical Wi-Fi or Ethernet IPv4 address, strictly ignoring virtual bridges and tunnels."""
+    ignored_prefixes = ("bridge", "vmnet", "vmenet", "vbox", "utun", "docker", "p2p", "awdl", "llw", "lo")
+    iface_ips = {}
+
     try:
         out = subprocess.check_output(["ifconfig"], text=True, stderr=subprocess.DEVNULL)
         current_iface = None
-        iface_ips = {}
         for line in out.splitlines():
             if line and not line.startswith("\t") and not line.startswith(" "):
                 current_iface = line.split(":")[0]
@@ -40,52 +53,40 @@ def get_all_lan_ips():
                     if not ip.startswith("127.") and not ip.startswith("169.254."):
                         iface_ips[current_iface].append(ip)
 
-        # Prioritize en0 (primary Wi-Fi on macOS)
+        # 1. Prioritize en0 (standard primary Wi-Fi interface on macOS)
         if "en0" in iface_ips and iface_ips["en0"]:
-            for ip in iface_ips["en0"]:
-                if ip not in candidates:
-                    candidates.append(ip)
+            return iface_ips["en0"][0]
 
-        # Other standard interfaces (en1, en2, eth0, wlan0)
+        # 2. Check other non-virtual physical interfaces
         for iface, ips in iface_ips.items():
-            if iface not in ("en0", "bridge100", "bridge0", "lo0"):
-                for ip in ips:
-                    if ip not in candidates:
-                        candidates.append(ip)
-
-        # Virtual bridges as fallback
-        for iface, ips in iface_ips.items():
-            for ip in ips:
-                if ip not in candidates:
-                    candidates.append(ip)
+            if not any(iface.startswith(prefix) for prefix in ignored_prefixes):
+                if ips:
+                    return ips[0]
     except Exception:
         pass
 
-    # 2. Hostname resolution fallback
+    # 3. Fallback: Hostname address lookup
     try:
         host = socket.gethostname()
         for info in socket.getaddrinfo(host, None):
             ip = info[4][0]
-            if ip and not ip.startswith("127.") and ":" not in ip and ip not in candidates:
-                candidates.append(ip)
+            if ip and not ip.startswith("127.") and not ip.startswith("192.168.2.") and ":" not in ip:
+                return ip
     except Exception:
         pass
 
-    # 3. UDP socket route probe fallback
+    # 4. Fallback: Socket route probe
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("1.1.1.1", 80))
         ip = s.getsockname()[0]
         s.close()
-        if ip and not ip.startswith("127.") and ip not in candidates:
-            candidates.insert(0, ip)
+        if ip and not ip.startswith("127."):
+            return ip
     except Exception:
         pass
 
-    if not candidates:
-        candidates.append("127.0.0.1")
-
-    return candidates
+    return "127.0.0.1"
 
 def find_available_port(start_port=8000, max_tries=50):
     for port in range(start_port, start_port + max_tries):
@@ -102,7 +103,6 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(base_dir), **kwargs)
 
     def log_message(self, format, *args):
-        # Keep terminal output quiet and clean
         pass
 
     def do_GET(self):
@@ -110,15 +110,16 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
 
-        # API: Return detected network IP addresses
+        # API: Return accurate physical Wi-Fi IP and Bonjour hostname
         if path == "/api/network-info":
-            lan_ips = get_all_lan_ips()
+            wifi_ip = get_physical_wifi_ip()
+            bonjour = get_bonjour_hostname()
             port = self.server.server_address[1]
             data = {
                 "port": port,
-                "primary_ip": lan_ips[0] if lan_ips else "127.0.0.1",
-                "all_ips": lan_ips,
-                "ipad_url": f"http://{lan_ips[0]}:{port}"
+                "primary_ip": wifi_ip,
+                "ipad_url": f"http://{wifi_ip}:{port}",
+                "bonjour_url": f"http://{bonjour}:{port}" if bonjour else ""
             }
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
@@ -160,7 +161,6 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
-            # Send initial keep-alive ping
             try:
                 self.wfile.write(b": connected\n\n")
                 self.wfile.flush()
@@ -178,7 +178,6 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
                         self.wfile.write(payload)
                         self.wfile.flush()
                     except queue.Empty:
-                        # Periodic keep-alive ping
                         self.wfile.write(b": ping\n\n")
                         self.wfile.flush()
             except Exception:
@@ -210,12 +209,10 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            # If message is full board state, cache it
             if data.get("type") == "full_state":
                 with ROOM_LOCK:
                     ROOM_STATES[room_id] = data.get("state", {})
 
-            # Push to all active subscriber queues for this room
             with ROOM_LOCK:
                 subscribers = list(ROOM_SUBSCRIBERS.get(room_id, []))
 
@@ -248,22 +245,28 @@ class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 def run_server():
     port = find_available_port(8000)
-    lan_ips = get_all_lan_ips()
-    primary_ip = lan_ips[0]
+    wifi_ip = get_physical_wifi_ip()
+    bonjour = get_bonjour_hostname()
 
     local_url = f"http://localhost:{port}"
-    wifi_url = f"http://{primary_ip}:{port}"
+    wifi_url = f"http://{wifi_ip}:{port}"
+    bonjour_url = f"http://{bonjour}:{port}" if bonjour else ""
 
     server = ThreadingTCPServer(("0.0.0.0", port), WhiteboardHandler)
 
+    print("==================================================")
+    print("Whiteboard Web Server Running")
+    print("==================================================")
+    print(f"Mac Browser:   {local_url}")
+    print(f"iPad on Wi-Fi: {wifi_url}")
+    if bonjour_url:
+        print(f"Apple Bonjour: {bonjour_url}")
     print("--------------------------------------------------")
-    print("Whiteboard Web Application")
-    print("--------------------------------------------------")
-    print(f"Local Mac URL:  {local_url}")
-    print(f"iPad on Wi-Fi:  {wifi_url}")
-    if len(lan_ips) > 1:
-        print(f"Alternative IP: http://{lan_ips[1]}:{port}")
-    print("--------------------------------------------------")
+    print("Important instructions for iPad:")
+    print(f"1. Open Safari on your iPad and go to: {wifi_url}")
+    print(f"   (Always remember to include :{port} at the end)")
+    print("2. Or scan the QR code in the Share dialog on your Mac screen.")
+    print("==================================================")
     print("Opening browser on Mac...")
     print("Press Ctrl+C to stop the server.")
 

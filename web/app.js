@@ -273,9 +273,26 @@ class WhiteboardApp {
           if (this.wifiUrlInput) {
             this.wifiUrlInput.value = fullIpadUrl;
           }
+          this.renderQrCode(fullIpadUrl);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        const fallbackUrl = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomCode)}`;
+        this.renderQrCode(fallbackUrl);
+      });
+  }
+
+  renderQrCode(url) {
+    if (typeof window.qrcode === 'undefined') return;
+    try {
+      const qr = window.qrcode(0, 'M');
+      qr.addData(url);
+      qr.make();
+      const container = document.getElementById('qrCodeContainer');
+      if (container) {
+        container.innerHTML = qr.createSvgTag({ scalable: true });
+      }
+    } catch (_) {}
   }
 
   /* ---------------- Resize & DPI Setup ---------------- */

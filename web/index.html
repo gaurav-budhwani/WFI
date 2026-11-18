@@ -8,7 +8,8 @@
   <link rel="icon" type="image/svg+xml" href="./favicon.svg">
   <link rel="stylesheet" href="./style.css">
 
-  <!-- Real-time PeerJS Library (Local offline-first with CDN fallback) -->
+  <!-- Offline QR Code & WebRTC Libraries -->
+  <script src="./vendor/qrcode.min.js"></script>
   <script src="./vendor/peerjs.min.js"></script>
   <script>
     if (!window.Peer) {
@@ -391,10 +392,19 @@
           </button>
         </div>
 
-        <!-- Wi-Fi URL Card for iPad -->
+        <!-- Wi-Fi URL Card with QR Code for iPad -->
         <div class="wifi-info-card" id="wifiInfoCard">
-          <span class="wifi-card-title">iPad on Wi-Fi</span>
-          <p class="wifi-card-desc">Open this URL in Safari on your iPad to illustrate live on the local network:</p>
+          <div class="wifi-card-header">
+            <span class="wifi-card-title">iPad on Wi-Fi</span>
+            <span class="wifi-badge">Scan to Connect</span>
+          </div>
+          <p class="wifi-card-desc">Scan with your iPad camera or open this exact link in Safari:</p>
+          
+          <div class="qr-code-wrapper" id="qrCodeWrapper">
+            <div id="qrCodeContainer" class="qr-code-box"></div>
+            <span class="qr-hint">Scan with iPad Camera</span>
+          </div>
+
           <div class="wifi-url-box">
             <input type="text" id="wifiUrlInput" class="share-input" readonly placeholder="Detecting Wi-Fi address...">
             <button type="button" class="btn-copy-code" id="copyWifiUrlBtn">Copy iPad URL</button>

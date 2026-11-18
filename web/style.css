@@ -962,7 +962,13 @@ body[data-theme="light"] .icon-moon {
   padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+}
+
+.wifi-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .wifi-card-title {
@@ -973,10 +979,54 @@ body[data-theme="light"] .icon-moon {
   color: var(--status-green);
 }
 
+.wifi-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--status-green);
+  background: rgba(52, 199, 89, 0.14);
+  padding: 2px 7px;
+  border-radius: 5px;
+  text-transform: uppercase;
+}
+
 .wifi-card-desc {
   font-size: 12px;
   color: var(--text-secondary);
   line-height: 1.4;
+}
+
+.qr-code-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #ffffff;
+  padding: 14px;
+  border-radius: 10px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.qr-code-box {
+  width: 140px;
+  height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.qr-code-box svg {
+  width: 100%;
+  height: 100%;
+  shape-rendering: crispEdges;
+}
+
+.qr-hint {
+  font-size: 11px;
+  font-weight: 600;
+  color: #1c1c1e;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .wifi-url-box {
