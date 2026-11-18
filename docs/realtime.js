@@ -197,7 +197,11 @@ export class RealtimeManager {
       };
 
       this.eventSource.onerror = () => {
-        // SSE error or offline, WebRTC handles fallback
+        // If SSE fails or running on static hosting (e.g. GitHub Pages), close SSE and rely on WebRTC
+        if (this.eventSource) {
+          try { this.eventSource.close(); } catch (_) {}
+          this.eventSource = null;
+        }
       };
     } catch (_) {}
   }

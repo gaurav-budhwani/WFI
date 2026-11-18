@@ -96,6 +96,9 @@ def find_available_port(start_port=8000, max_tries=50):
     return start_port
 
 class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
+    # Use HTTP/1.1 so EventSource (SSE) connections remain persistently open
+    protocol_version = "HTTP/1.1"
+
     def __init__(self, *args, **kwargs):
         base_dir = Path(__file__).resolve().parent / "web"
         if not base_dir.exists():
@@ -104,6 +107,18 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, format, *args):
         pass
+
+    def handle(self):
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except OSError as e:
+            # 57: Socket not connected, 54: Connection reset by peer, 32: Broken pipe
+            if e.errno in (57, 54, 32):
+                pass
+            else:
+                raise
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -126,8 +141,10 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
+            self.close_connection = True
             return
 
         # API: Retrieve current room state snapshot
@@ -140,8 +157,10 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
+            self.close_connection = True
             return
 
         # API: Server-Sent Events (SSE) live streaming for local Wi-Fi sync
@@ -154,6 +173,7 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
                     ROOM_SUBSCRIBERS[room_id] = []
                 ROOM_SUBSCRIBERS[room_id].append(client_queue)
 
+            self.close_connection = True
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -225,8 +245,10 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
+            self.close_connection = True
             return
 
         self.send_response(404)
@@ -242,6 +264,15 @@ class WhiteboardHandler(http.server.SimpleHTTPRequestHandler):
 class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
     daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # Gracefully silence normal browser disconnects and socket resets
+        exc_type, exc_val, exc_tb = sys.exc_info()
+        if isinstance(exc_val, (BrokenPipeError, ConnectionResetError)):
+            return
+        if isinstance(exc_val, OSError) and exc_val.errno in (57, 54, 32):
+            return
+        super().handle_error(request, client_address)
 
 def run_server():
     port = find_available_port(8000)
