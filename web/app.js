@@ -41,6 +41,7 @@ class WhiteboardApp {
     this.toolShapeBtn = document.getElementById('toolShape');
     this.roomStatusBadge = document.getElementById('roomStatusBadge');
     this.roomStatusLabel = document.getElementById('roomStatusLabel');
+    this.collaboratorAvatars = document.getElementById('collaboratorAvatars');
     this.toastNotification = document.getElementById('toastNotification');
 
     // Sliders & Style Buttons
@@ -132,9 +133,7 @@ class WhiteboardApp {
     // GoodNotes Laser Pointer State
     this.isLaserActive = false;
     this.laserTrail = []; // { x, y, timestamp }
-    this.remoteLaserTrail = []; // { x, y, timestamp }
-    this.remoteLaserActive = false;
-    this.remoteLaserPos = { x: 0, y: 0 };
+    this.remoteLasers = new Map(); // senderId -> { trail: [], active: false, pos: null, color: '#...', name: '...' }
     this.laserAnimFrame = null;
 
     // Subsystems
@@ -179,6 +178,9 @@ class WhiteboardApp {
       },
       onParticipantCountChange: (count) => {
         this.connectedCountText.innerText = `${count} participant${count === 1 ? '' : 's'} connected`;
+      },
+      onParticipantUpdate: (participants) => {
+        this.renderCollaboratorAvatars(participants);
       },
       getFullBoardState: () => {
         return this.serializeBoard();
@@ -436,20 +438,59 @@ class WhiteboardApp {
     ctx.restore();
   }
 
-  /* ---------------- GoodNotes Laser Pointer & Trail ---------------- */
-  handleRemoteLaser(data) {
-    if (!data.active) {
-      this.remoteLaserActive = false;
-      return;
+  /* ---------------- Multi-User Presence & Avatars ---------------- */
+  renderCollaboratorAvatars(participants = []) {
+    if (!this.collaboratorAvatars) return;
+    this.collaboratorAvatars.innerHTML = '';
+
+    const maxDisplay = 4;
+    const displayed = participants.slice(0, maxDisplay);
+
+    for (const p of displayed) {
+      const avatar = document.createElement('div');
+      avatar.className = 'collaborator-avatar';
+      avatar.style.backgroundColor = p.color || '#0071e3';
+      avatar.title = `${p.name || 'User'}${p.isHost ? ' (Host)' : ''}`;
+
+      const initial = (p.name || 'U').charAt(0).toUpperCase();
+      avatar.innerText = initial;
+      this.collaboratorAvatars.appendChild(avatar);
     }
 
-    this.remoteLaserActive = true;
-    this.remoteLaserPos = { x: data.x, y: data.y };
-    this.remoteLaserTrail.push({
-      x: data.x,
-      y: data.y,
-      timestamp: Date.now()
-    });
+    if (participants.length > maxDisplay) {
+      const overflowBadge = document.createElement('span');
+      overflowBadge.className = 'collaborator-count-badge';
+      overflowBadge.innerText = `+${participants.length - maxDisplay}`;
+      this.collaboratorAvatars.appendChild(overflowBadge);
+    }
+  }
+
+  /* ---------------- GoodNotes Laser Pointer & Trail ---------------- */
+  handleRemoteLaser(data) {
+    const id = data.senderId || 'default';
+    if (!this.remoteLasers.has(id)) {
+      this.remoteLasers.set(id, {
+        trail: [],
+        active: false,
+        pos: null,
+        color: data.userColor || '#ff3b30',
+        name: data.userName || 'Participant'
+      });
+    }
+
+    const laser = this.remoteLasers.get(id);
+    laser.active = !!data.active;
+    if (data.userColor) laser.color = data.userColor;
+    if (data.userName) laser.name = data.userName;
+
+    if (data.active) {
+      laser.pos = { x: data.x, y: data.y };
+      laser.trail.push({
+        x: data.x,
+        y: data.y,
+        timestamp: Date.now()
+      });
+    }
 
     this.triggerLaserLoop();
   }
@@ -476,29 +517,43 @@ class WhiteboardApp {
     ctx.translate(this.panX, this.panY);
     ctx.scale(this.scale, this.scale);
 
-    // Filter points older than trail duration
+    // Filter local laser trail
     this.laserTrail = this.laserTrail.filter(pt => now - pt.timestamp < trailDuration);
-    this.remoteLaserTrail = this.remoteLaserTrail.filter(pt => now - pt.timestamp < trailDuration);
 
     // Draw Local Laser Trail
-    this.drawFadingLaserSegments(ctx, this.laserTrail, now, trailDuration);
+    this.drawFadingLaserSegments(ctx, this.laserTrail, now, trailDuration, '#ff3b30');
 
-    // Draw Remote Laser Trail & Dot
-    this.drawFadingLaserSegments(ctx, this.remoteLaserTrail, now, trailDuration);
-
-    if (this.remoteLaserActive && this.remoteLaserPos) {
-      this.drawLaserDot(ctx, this.remoteLaserPos.x, this.remoteLaserPos.y);
+    // Draw Remote Collaborator Lasers
+    let hasRemoteActive = false;
+    for (const laser of this.remoteLasers.values()) {
+      laser.trail = laser.trail.filter(pt => now - pt.timestamp < trailDuration);
+      if (laser.trail.length > 0) {
+        this.drawFadingLaserSegments(ctx, laser.trail, now, trailDuration, laser.color);
+      }
+      if (laser.active && laser.pos) {
+        hasRemoteActive = true;
+        this.drawLaserDot(ctx, laser.pos.x, laser.pos.y, laser.color, laser.name);
+      }
     }
 
     ctx.restore();
 
-    // Continue animation loop if trails still exist or active
-    if (this.laserTrail.length > 0 || this.remoteLaserTrail.length > 0 || this.isLaserActive || this.remoteLaserActive) {
+    // Continue animation loop if trails still exist or lasers are active
+    const hasLocalTrail = this.laserTrail.length > 0 || this.isLaserActive;
+    let hasRemoteTrail = false;
+    for (const laser of this.remoteLasers.values()) {
+      if (laser.trail.length > 0 || laser.active) {
+        hasRemoteTrail = true;
+        break;
+      }
+    }
+
+    if (hasLocalTrail || hasRemoteTrail) {
       this.laserAnimFrame = requestAnimationFrame(() => this.renderLaserTrail());
     }
   }
 
-  drawFadingLaserSegments(ctx, trail, now, duration) {
+  drawFadingLaserSegments(ctx, trail, now, duration, color = '#ff3b30') {
     if (trail.length < 2) return;
 
     ctx.lineCap = 'round';
@@ -512,9 +567,10 @@ class WhiteboardApp {
       if (progress <= 0) continue;
 
       ctx.save();
-      ctx.shadowColor = '#ff3b30';
+      ctx.shadowColor = color;
       ctx.shadowBlur = 12 * progress;
-      ctx.strokeStyle = `rgba(255, 59, 48, ${progress * 0.95})`;
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = progress * 0.95;
       ctx.lineWidth = Math.max(2, 6 * progress);
 
       ctx.beginPath();
@@ -525,20 +581,47 @@ class WhiteboardApp {
     }
   }
 
-  drawLaserDot(ctx, worldX, worldY) {
+  drawLaserDot(ctx, worldX, worldY, color = '#ff3b30', label = null) {
     ctx.save();
-    ctx.shadowColor = '#ff3b30';
+    ctx.shadowColor = color;
     ctx.shadowBlur = 16;
-    ctx.fillStyle = '#ff3b30';
+    ctx.fillStyle = color;
 
+    // Glowing main laser dot
     ctx.beginPath();
     ctx.arc(worldX, worldY, 7 / this.scale, 0, Math.PI * 2);
     ctx.fill();
 
+    // Hot center core
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.arc(worldX, worldY, 2.5 / this.scale, 0, Math.PI * 2);
     ctx.fill();
+
+    // Draw user name tag if available
+    if (label) {
+      ctx.shadowBlur = 0;
+      ctx.font = `600 ${Math.max(10, 11 / this.scale)}px -apple-system, BlinkMacSystemFont, sans-serif`;
+      const textMetrics = ctx.measureText(label);
+      const paddingH = 6 / this.scale;
+      const pillW = textMetrics.width + (paddingH * 2);
+      const pillH = 16 / this.scale;
+      const pillX = worldX - (pillW / 2);
+      const pillY = worldY - (22 / this.scale);
+
+      // Pill Background
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.roundRect(pillX, pillY, pillW, pillH, 4 / this.scale);
+      ctx.fill();
+
+      // Pill Label
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, worldX, pillY + (pillH / 2));
+    }
+
     ctx.restore();
   }
 
